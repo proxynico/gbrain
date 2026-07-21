@@ -44,6 +44,25 @@ describe('parsePageFrontmatterFilters', () => {
     })))).toThrow(PageListFilterError);
   });
 
+  test('rejects sparse filter arrays', () => {
+    const sparseFilters: unknown[] = [];
+    sparseFilters.length = 1;
+
+    expect(() => parsePageFrontmatterFilters(sparseFilters))
+      .toThrow(PageListFilterError);
+  });
+
+  test('rejects sparse contains-any value arrays', () => {
+    const sparseValues: unknown[] = [];
+    sparseValues.length = 1;
+
+    expect(() => parsePageFrontmatterFilters([{
+      field: 'subject',
+      operator: 'contains_any_ci',
+      values: sparseValues,
+    }])).toThrow(PageListFilterError);
+  });
+
   test('rejects unsupported operators', () => {
     expect(() => parsePageFrontmatterFilters([
       { field: 'subject', operator: 'starts_with_ci', value: 'Update' },

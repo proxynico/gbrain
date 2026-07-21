@@ -57,7 +57,7 @@ export function parsePageFrontmatterFilters(raw: unknown): PageFrontmatterFilter
     );
   }
 
-  return raw.map((item, index) => {
+  return Array.from(raw, (item, index) => {
     if (!isRecord(item)) {
       throw new PageListFilterError(`frontmatter_filters[${index}] must be an object`);
     }
@@ -78,7 +78,7 @@ export function parsePageFrontmatterFilters(raw: unknown): PageFrontmatterFilter
       return {
         field,
         operator: 'contains_any_ci',
-        values: item.values.map(parseValue),
+        values: Array.from(item.values, parseValue),
       };
     }
     throw new PageListFilterError(
