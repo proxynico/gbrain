@@ -286,11 +286,16 @@ export interface PageInput {
   ingested_at?: Date | null;
 }
 
+export type PageFrontmatterFilter =
+  | { field: string; operator: 'eq_ci'; value: string }
+  | { field: string; operator: 'contains_any_ci'; values: string[] };
+
 export interface PageFilters {
   type?: PageType;
   tag?: string;
   limit?: number;
   offset?: number;
+  frontmatterFilters?: PageFrontmatterFilter[];
   /** ISO date string (YYYY-MM-DD or full ISO timestamp). Filter to pages updated_at > value. */
   updated_after?: string;
   /**

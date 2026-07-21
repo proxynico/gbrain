@@ -1,0 +1,115 @@
+import type { PageFrontmatterFilter } from './types.ts';
+
+export type { PageFrontmatterFilter };
+
+const FIELD_RE = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
+const MAX_FILTERS = 8;
+const MAX_FIELDS = 16;
+const MAX_VALUES = 16;
+const MAX_VALUE_LENGTH = 512;
+
+export class PageListFilterError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PageListFilterError';
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parseField(value: unknown): string {
+  if (typeof value !== 'string' || !FIELD_RE.test(value)) {
+    throw new PageListFilterError(
+      'frontmatter field must be a top-level identifier of at most 64 characters',
+    );
+  }
+  return value;
+}
+
+function parseValue(value: unknown): string {
+  if (
+    typeof value !== 'string'
+    || value.trim().length === 0
+    || value.length > MAX_VALUE_LENGTH
+  ) {
+    throw new PageListFilterError(
+      'frontmatter value must be a non-empty string of at most 512 characters',
+    );
+  }
+  return value;
+}
+
+export function parsePageListOffset(raw: unknown): number | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 0) {
+    throw new PageListFilterError('offset must be a non-negative integer');
+  }
+  return raw;
+}
+
+export function parsePageFrontmatterFilters(raw: unknown): PageFrontmatterFilter[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw) || raw.length > MAX_FILTERS) {
+    throw new PageListFilterError(
+      `frontmatter_filters must be an array of at most ${MAX_FILTERS} clauses`,
+    );
+  }
+
+  return raw.map((item, index) => {
+    if (!isRecord(item)) {
+      throw new PageListFilterError(`frontmatter_filters[${index}] must be an object`);
+    }
+    const field = parseField(item.field);
+    if (item.operator === 'eq_ci') {
+      return { field, operator: 'eq_ci', value: parseValue(item.value) };
+    }
+    if (item.operator === 'contains_any_ci') {
+      if (
+        !Array.isArray(item.values)
+        || item.values.length === 0
+        || item.values.length > MAX_VALUES
+      ) {
+        throw new PageListFilterError(
+          `frontmatter_filters[${index}].values must contain 1-${MAX_VALUES} strings`,
+        );
+      }
+      return {
+        field,
+        operator: 'contains_any_ci',
+        values: item.values.map(parseValue),
+      };
+    }
+    throw new PageListFilterError(
+      `frontmatter_filters[${index}] has an unsupported operator`,
+    );
+  });
+}
+
+export function parsePageFrontmatterFields(raw: unknown): string[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw) || raw.length > MAX_FIELDS) {
+    throw new PageListFilterError(
+      `frontmatter_fields must be an array of at most ${MAX_FIELDS} fields`,
+    );
+  }
+  const fields: string[] = [];
+  for (const value of raw) {
+    const field = parseField(value);
+    if (!fields.includes(field)) fields.push(field);
+  }
+  return fields;
+}
+
+export function projectPageFrontmatter(
+  frontmatter: Record<string, unknown> | null | undefined,
+  fields: readonly string[],
+): Record<string, unknown> {
+  if (!frontmatter) return {};
+  const projected: Record<string, unknown> = {};
+  for (const field of fields) {
+    if (Object.hasOwn(frontmatter, field)) projected[field] = frontmatter[field];
+  }
+  return projected;
+}
