@@ -7,10 +7,21 @@ import { lstatSync, realpathSync } from 'fs';
 import { resolve, relative, sep } from 'path';
 import type { BrainEngine } from './engine.ts';
 import { clampSearchLimit } from './engine.ts';
-import type { GBrainConfig } from './config.ts';
+import { resolveMarketSignalsConfig, type GBrainConfig } from './config.ts';
 import type { PageType } from './types.ts';
+import { hasScope } from './scope.ts';
 import { importFromContent } from './import-file.ts';
 import { writePageThrough, type WriteThroughResult } from './write-through.ts';
+import {
+  BrainMarketSignalStore,
+  type ReadMarketSignalsInput,
+} from './market-signals/store.ts';
+import {
+  MARKET_SIGNAL_STATES,
+  MARKET_SIGNAL_TYPES,
+  type MarketSignalState,
+  type MarketSignalType,
+} from './market-signals/types.ts';
 import { hybridSearch, hybridSearchCached, stampContentFlags, stampUnverifiedExtractions } from './search/hybrid.ts';
 import { looksConceptShaped } from './search/query-intent.ts';
 import { expandQuery } from './search/expansion.ts';
@@ -7258,6 +7269,199 @@ const request_tools: Operation = {
       total_tools: visible.length,
       note: 'Call request_tools {tools: ["name", ...]} for full schemas, or {surface: "starter"|"full"} to persist a wider tool surface (within the server ceiling), then re-issue tools/list.',
     };
+const READ_MARKET_SIGNALS_DESCRIPTION =
+  'Read human-reviewed market signals from exactly one granted derived source without model calls. ' +
+  'Returns ready signals by default; use an explicit state only when a broader review state is needed.';
+
+const REVIEW_MARKET_SIGNAL_DESCRIPTION =
+  'Record a human ready or excluded decision for one market signal in exactly one ' +
+  'write-authorized derived source. Requires a named human reviewer; never infer this decision.';
+
+const ALL_MARKET_SIGNAL_SOURCES = '__all__';
+
+function optionalMarketSignalFilter(
+  params: Record<string, unknown>,
+  field: 'origin' | 'destination' | 'equipment' | 'currency',
+): string | undefined {
+  const value = params[field];
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new OperationError('invalid_params', `${field} must be a non-empty string`);
+  }
+  return value.trim();
+}
+
+export function parseReadMarketSignalsInput(
+  params: Record<string, unknown>,
+  sourceId: string,
+): ReadMarketSignalsInput {
+  let states: MarketSignalState[] | undefined;
+  if (params.state !== undefined) {
+    if (
+      typeof params.state !== 'string'
+      || !(MARKET_SIGNAL_STATES as readonly string[]).includes(params.state)
+    ) {
+      throw new OperationError('invalid_params', `invalid market signal state: ${String(params.state)}`);
+    }
+    states = [params.state as MarketSignalState];
+  }
+
+  let limit: number | undefined;
+  if (params.limit !== undefined) {
+    if (typeof params.limit !== 'number' || !Number.isFinite(params.limit)) {
+      throw new OperationError('invalid_params', 'limit must be a finite number');
+    }
+    limit = Math.max(1, Math.min(100, Math.floor(params.limit)));
+  }
+
+  const origin = optionalMarketSignalFilter(params, 'origin');
+  const destination = optionalMarketSignalFilter(params, 'destination');
+  const equipment = optionalMarketSignalFilter(params, 'equipment');
+  const currency = optionalMarketSignalFilter(params, 'currency');
+  let signalType: MarketSignalType | undefined;
+  if (params.signal_type !== undefined) {
+    if (
+      typeof params.signal_type !== 'string'
+      || !(MARKET_SIGNAL_TYPES as readonly string[]).includes(params.signal_type)
+    ) {
+      throw new OperationError(
+        'invalid_params',
+        `invalid market signal type: ${String(params.signal_type)}`,
+      );
+    }
+    signalType = params.signal_type as MarketSignalType;
+  }
+  return {
+    sourceId,
+    ...(origin === undefined ? {} : { origin }),
+    ...(destination === undefined ? {} : { destination }),
+    ...(equipment === undefined ? {} : { equipment }),
+    ...(currency === undefined ? {} : { currency }),
+    ...(signalType === undefined ? {} : { signalType }),
+    ...(states === undefined ? {} : { states }),
+    ...(limit === undefined ? {} : { limit }),
+  };
+}
+
+function requireExpectedMarketSignalSource(
+  sourceId: string | undefined,
+  expectedSourceId: string,
+): string {
+  if (!sourceId || sourceId === ALL_MARKET_SIGNAL_SOURCES) {
+    throw new OperationError(
+      'permission_denied',
+      'Market signals require exactly one granted source.',
+    );
+  }
+  if (sourceId !== expectedSourceId) {
+    throw new OperationError(
+      'permission_denied',
+      `Market signals require the configured derived source '${expectedSourceId}'.`,
+    );
+  }
+  return sourceId;
+}
+
+function requireSingleMarketSignalReadSource(
+  ctx: OperationContext,
+  expectedSourceId: string,
+): string {
+  const scope = sourceScopeOpts(ctx);
+  if (scope.sourceIds !== undefined) {
+    if (scope.sourceIds.length !== 1) {
+      throw new OperationError(
+        'permission_denied',
+        'Market signals require exactly one granted source; federated reads are not allowed.',
+      );
+    }
+    return requireExpectedMarketSignalSource(scope.sourceIds[0], expectedSourceId);
+  }
+  return requireExpectedMarketSignalSource(scope.sourceId, expectedSourceId);
+}
+
+function requireSingleMarketSignalWriteSource(
+  ctx: OperationContext,
+  expectedSourceId: string,
+): string {
+  if (ctx.remote !== false) {
+    if (!ctx.auth || !hasScope(ctx.auth.scopes, 'write')) {
+      throw new OperationError(
+        'permission_denied',
+        'Remote market-signal review requires explicit write authorization.',
+      );
+    }
+    if (!ctx.auth.sourceId || ctx.auth.sourceId !== ctx.sourceId) {
+      throw new OperationError(
+        'permission_denied',
+        'Remote market-signal review requires exactly one matching write-authorized source.',
+      );
+    }
+    return requireExpectedMarketSignalSource(ctx.auth.sourceId, expectedSourceId);
+  }
+  return requireExpectedMarketSignalSource(ctx.sourceId, expectedSourceId);
+}
+
+const read_market_signals: Operation = {
+  name: 'read_market_signals',
+  description: READ_MARKET_SIGNALS_DESCRIPTION,
+  scope: 'read',
+  params: {
+    state: { type: 'string', required: false, enum: [...MARKET_SIGNAL_STATES] },
+    origin: { type: 'string', required: false },
+    destination: { type: 'string', required: false },
+    equipment: { type: 'string', required: false },
+    currency: { type: 'string', required: false },
+    signal_type: { type: 'string', required: false, enum: [...MARKET_SIGNAL_TYPES] },
+    limit: { type: 'number', required: false },
+  },
+  handler: async (ctx, params) => {
+    const config = resolveMarketSignalsConfig(ctx.config);
+    const sourceId = requireSingleMarketSignalReadSource(ctx, config.derived_source_id);
+    const store = new BrainMarketSignalStore(ctx.engine, {
+      rawSourceId: config.raw_source_id,
+      derivedSourceId: sourceId,
+    });
+    return store.readMarketSignals(parseReadMarketSignalsInput(params, sourceId));
+  },
+};
+
+const review_market_signal: Operation = {
+  name: 'review_market_signal',
+  description: REVIEW_MARKET_SIGNAL_DESCRIPTION,
+  scope: 'write',
+  mutating: true,
+  params: {
+    signal_id: { type: 'string', required: true },
+    state: { type: 'string', required: true, enum: ['ready', 'excluded'] },
+    reviewer: { type: 'string', required: true },
+    note: { type: 'string', required: false },
+  },
+  handler: async (ctx, params) => {
+    const config = resolveMarketSignalsConfig(ctx.config);
+    const sourceId = requireSingleMarketSignalWriteSource(ctx, config.derived_source_id);
+    if (params.state !== 'ready' && params.state !== 'excluded') {
+      throw new OperationError('invalid_params', 'review state must be ready or excluded');
+    }
+    if (typeof params.signal_id !== 'string' || params.signal_id.trim() === '') {
+      throw new OperationError('invalid_params', 'signal_id must be non-empty');
+    }
+    if (typeof params.reviewer !== 'string' || params.reviewer.trim() === '') {
+      throw new OperationError('invalid_params', 'reviewer must name the human reviewer');
+    }
+    if (params.note !== undefined && typeof params.note !== 'string') {
+      throw new OperationError('invalid_params', 'note must be a string');
+    }
+    const store = new BrainMarketSignalStore(ctx.engine, {
+      rawSourceId: config.raw_source_id,
+      derivedSourceId: sourceId,
+    });
+    return store.reviewMarketSignal({
+      sourceId,
+      signalId: params.signal_id.trim(),
+      state: params.state,
+      reviewer: params.reviewer.trim(),
+      ...(typeof params.note === 'string' ? { note: params.note } : {}),
+    });
   },
 };
 
@@ -7325,6 +7529,8 @@ export const operations: Operation[] = [
   volunteer_chronicle, chronicle_backfill,
   // v0.43 (#2095): push-based context
   volunteer_context,
+  // Manual market-signals feed: source-scoped read + human review.
+  read_market_signals, review_market_signal,
   // Extraction quarantine lane (#160): gated entity extraction + review queue
   extract_entities, extraction_pending, extraction_review,
   // v0.31: hot memory (facts table)

@@ -192,6 +192,8 @@ const SELF_HELP_WITHOUT_ENGINE: Record<string, () => Promise<(engine: never, arg
   // runDream accepts BrainEngine | null; --help (and `retriage --help`) is
   // answered before any engine-bearing work per the dream.ts IRON RULE.
   dream: async () => (await import('./commands/dream.ts')).runDream as never,
+  'market-signals': async () =>
+    (await import('./commands/market-signals.ts')).runMarketSignals as never,
 };
 
 /** Returns true when the command's own help was printed. */
@@ -205,6 +207,11 @@ async function printSelfHelpWithoutEngine(command: string, args: string[]): Prom
   await run(null as never, args);
   return true;
 }
+
+// nicobrain local: manual market-signals feed (not upstream). Registered by
+// .add() rather than inline so the upstream literals above stay merge-clean.
+CLI_ONLY.add('market-signals');
+CLI_ONLY_SELF_HELP.add('market-signals');
 
 // v114 (#1941): alias -> operation lookup, kept separate from `cliOps` so
 // aliases don't double-list in printHelp's auto-generated section. Collisions
@@ -2248,6 +2255,12 @@ async function handleCliOnly(command: string, args: string[]) {
     return;
   }
 
+  if (command === 'market-signals' && (args.includes('--help') || args.includes('-h'))) {
+    const { runMarketSignals } = await import('./commands/market-signals.ts');
+    await runMarketSignals(null as never, args);
+    return;
+  }
+
   // v0.41.6.0 D3 (per outside-voice F1): connect-time + dispatch-time wallclock
   // timeouts for read-only commands whose hang would otherwise spin at 100% CPU
   // (the production "10-day zombie gbrain search ping" bug class). The wrap
@@ -2493,6 +2506,11 @@ async function handleCliOnly(command: string, args: string[]) {
       case 'sync': {
         const { runSync } = await import('./commands/sync.ts');
         await runSync(engine, args);
+        break;
+      }
+      case 'market-signals': {
+        const { runMarketSignals } = await import('./commands/market-signals.ts');
+        await runMarketSignals(engine, args);
         break;
       }
       case 'extract': {
@@ -3221,6 +3239,12 @@ BRAIN (capture / ideate / explore — v0.37/v0.38)
         [--save|--no-save] [--limit N]
   lsd <question> [--json]            Lateral Synaptic Drift: inverted-judge brainstorm
         [--save|--no-save] [--limit N]    rewarding far-from-obvious + axiomatic inversions
+
+MARKET SIGNALS (manual)
+  market-signals read [filters] --source ID
+                                     Read human-reviewed derived signals
+  market-signals candidates --source ID --forwarder EMAIL --since DATE --until DATE
+                                     Inspect forwarded originals; never writes automatically
 
 SOURCES (multi-repo / multi-brain)
   sources list                       Show registered sources

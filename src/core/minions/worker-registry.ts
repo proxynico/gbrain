@@ -143,21 +143,62 @@ function processLiveness(pid: number): 'alive' | 'dead' | 'unknown' {
 }
 
 /**
+ * Parse `ps -o etime=` output to milliseconds. Format is `[[dd-]hh:]mm:ss`.
+ * Returns null when the shape is unrecognized — callers must NOT treat null
+ * as "reused".
+ *
+ * Exported for tests: this is the piece that has to be right, and it cannot be
+ * exercised through processStartMs without depending on the host's timezone,
+ * which is exactly the bug it replaces.
+ */
+export function parseEtimeToMs(etime: string): number | null {
+  const raw = etime.trim();
+  if (!raw) return null;
+
+  let days = 0;
+  let rest = raw;
+  const dash = rest.indexOf('-');
+  if (dash !== -1) {
+    days = Number(rest.slice(0, dash));
+    rest = rest.slice(dash + 1);
+    if (!Number.isInteger(days) || days < 0) return null;
+  }
+
+  const parts = rest.split(':');
+  if (parts.length < 2 || parts.length > 3) return null;
+  if (!parts.every((s) => s.length > 0 && /^\d+$/.test(s))) return null;
+
+  const nums = parts.map(Number);
+  const [hours, minutes, seconds] =
+    nums.length === 3 ? nums : [0, nums[0]!, nums[1]!];
+
+  return (((days * 24 + hours!) * 60 + minutes!) * 60 + seconds!) * 1000;
+}
+
+/**
  * Best-effort process start time (epoch ms) via `ps`. Used for the PID-reuse
  * guard: a stale `worker-<pid>.json` plus an OS-reused pid would otherwise make
  * us report an unrelated process's niceness (Codex #8). Returns null when
  * undeterminable — callers must NOT treat null as "reused".
+ *
+ * Derived from ELAPSED time, not `lstart`. `ps -o lstart=` prints local time
+ * with no timezone ("Sat Jul 25 23:17:08 2026"); Date.parse reads that as UTC,
+ * so on any host east of UTC the computed start time ran ahead of the entry's
+ * `started_at` by the whole offset and the guard below dropped every live
+ * worker — readWorkers() returned an empty list on this brain (+0800). Elapsed
+ * time carries no timezone. `etime` is used rather than `etimes` because
+ * `etimes` is Linux-only and this also runs on macOS.
  */
 function processStartMs(pid: number): number | null {
   try {
-    const out = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
+    const out = execFileSync('ps', ['-o', 'etime=', '-p', String(pid)], {
       encoding: 'utf8',
       timeout: 2000,
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
     if (!out) return null;
-    const t = Date.parse(out);
-    return Number.isNaN(t) ? null : t;
+    const elapsedMs = parseEtimeToMs(out);
+    return elapsedMs === null ? null : Date.now() - elapsedMs;
   } catch {
     return null;
   }

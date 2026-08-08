@@ -25,12 +25,24 @@ export type DbUrlSource =
 function getConfigDir() { return configDir(); }
 function getConfigPath() { return configPath(); }
 
+export interface MarketSignalsConfig {
+  raw_source_id?: string;
+  derived_source_id?: string;
+}
+
+export interface ResolvedMarketSignalsConfig {
+  raw_source_id: string;
+  derived_source_id: string;
+}
+
 export interface GBrainConfig {
   engine: 'postgres' | 'pglite';
   /** File-plane hook-lane keys (read by engine-free hook/push children).
    * `gbrain config set` routes these two dotted keys here, not to the DB. */
   push?: { allow_unverified_remote?: boolean };
   hooks?: { stop_push_debounce_min?: number | string };
+  /** Manual market-signal feed source boundaries. */
+  market_signals?: MarketSignalsConfig;
   database_url?: string;
   database_path?: string;
   openai_api_key?: string;
@@ -455,6 +467,23 @@ export interface GBrainConfig {
      * over this file slot. Always bounded by the server ceiling (D2).
      */
     default_surface_dcr?: 'verbs' | 'starter' | 'full';
+  };
+}
+
+export function resolveMarketSignalsConfig(
+  config: GBrainConfig,
+): ResolvedMarketSignalsConfig {
+  const raw = config.market_signals;
+  const rawSourceId = raw?.raw_source_id?.trim() || 'default';
+  const derivedSourceId = raw?.derived_source_id?.trim() || 'lp-rate-intel';
+  if (rawSourceId === derivedSourceId) {
+    throw new Error(
+      'market_signals.raw_source_id and market_signals.derived_source_id must differ',
+    );
+  }
+  return {
+    raw_source_id: rawSourceId,
+    derived_source_id: derivedSourceId,
   };
 }
 
@@ -1142,6 +1171,15 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // Link resolution (issue #972)
   'link_resolution',
   'link_resolution.global_basename',
+  // Cross-source mention linking (local nicobrain patch, upstream candidate):
+  // opt-in flag + exact-title exclusion list for ambiguous names.
+  'link_resolution.cross_source_mentions',
+  'link_resolution.mention_ignore',
+  // Market signals (local nicobrain feature): raw/derived source routing,
+  // resolved by resolveMarketSignalsConfig with defaults default/lp-rate-intel.
+  'market_signals',
+  'market_signals.raw_source_id',
+  'market_signals.derived_source_id',
   // Spend controls (v0.42.42.0, issue #2139). Previously `--force`-only — the
   // operator had to discover these by reading source. Registered so `config
   // set` accepts them directly. See docs/operations/spend-controls.md.
