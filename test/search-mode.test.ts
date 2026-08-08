@@ -465,6 +465,18 @@ describe('knobsHash determinism + cross-mode separation (CDX-4)', () => {
     const b = knobsHash(resolveSearchMode({ mode: 'balanced', perCall: { floor_ratio: 0.85 } }));
     expect(a).toBe(b);
   });
+
+  test('preferred page types canonically segment semantic cache rows', () => {
+    const knobs = resolveSearchMode({ mode: 'balanced' });
+    const none = knobsHash(knobs);
+    const market = knobsHash(knobs, { preferredTypes: ['market-weekly'] });
+    const meetingTranscript = knobsHash(knobs, { preferredTypes: ['meeting', 'transcript'] });
+    const reversed = knobsHash(knobs, { preferredTypes: ['transcript', 'meeting'] });
+
+    expect(market).not.toBe(none);
+    expect(meetingTranscript).not.toBe(none);
+    expect(reversed).toBe(meetingTranscript);
+  });
 });
 
 describe('loadOverridesFromConfig flat-map parser', () => {

@@ -24,7 +24,7 @@
  */
 
 import { createHash } from 'crypto';
-import { CR_MODES, type CRMode } from '../types.ts';
+import { CR_MODES, type CRMode, type PageType } from '../types.ts';
 import { getFtsLanguage } from '../fts-language.ts';
 import { getRecipe } from '../ai/recipes/index.ts';
 
@@ -801,8 +801,10 @@ export function attributeKnob<K extends keyof ModeBundle>(
 // (Merge note: both this wave and master's #3515 wave claimed v=16 in
 // flight; the merge sequences them as 16 then 17.)
 // bump 17→18: matching market-week and quote-recall queries now add one
-// preferred-type recall arm. Candidate generation changes even though the
-// resolved mode knobs do not, so pre-change ranked rows must be unreachable.
+// preferred-type recall arm, and the canonical preference signature is part
+// of the semantic-cache hash. Candidate generation changes even though the
+// resolved mode knobs do not, and preferred/non-preferred semantic neighbors
+// must never share ranked rows.
 // Same one-time global cold-miss pattern; refills within cache.ttl_seconds.
 // (Rebase note: this local nicobrain arm claimed v=16 on 0.45.9; upstream's
 // #3515 and WP2/T3 waves took 16 and 17, so it sequences here as 18.)
@@ -856,6 +858,12 @@ export interface KnobsHashContext {
    * as col=/prov=. Undefined falls back to 'medium' (the documented default).
    */
   detail?: 'low' | 'medium' | 'high';
+   * v=18: effective classifier preference for this query. Semantic cache
+   * lookup is embedding-based, so adjacent query text can otherwise cross-hit
+   * across different candidate-generation paths. Sorted in knobsHash so the
+   * meeting/transcript set is order-independent. Undefined/empty means none.
+   */
+  preferredTypes?: PageType[];
 }
 
 export function knobsHash(
@@ -964,6 +972,13 @@ export function knobsHash(
     // a low write (compiled-truth-only set) must never be served to a
     // medium/high lookup. Undefined falls back to 'medium' (the default).
     `det=${ctx?.detail ?? 'medium'}`,
+    // v=18 addition (append-only): preferred-type candidate-generation state.
+    // Semantic lookup can match different query text with a near-identical
+    // embedding, so preference presence must segment both lookup and store.
+    // De-duplicate + sort for a canonical set signature.
+    `pref=${ctx?.preferredTypes?.length
+      ? [...new Set(ctx.preferredTypes)].sort().join(',')
+      : 'none'}`,
   ];
   const h = createHash('sha256');
   h.update(parts.join('|'));

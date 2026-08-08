@@ -833,6 +833,11 @@ export interface HybridSearchOpts extends SearchOpts {
   _telemetryCacheStatus?: 'miss' | 'disabled';
 }
 
+/** Explicit caller page-type constraints are hard filters, not ranking hints. */
+function hasExplicitTypeFilter(opts?: Pick<SearchOpts, 'type' | 'types'>): boolean {
+  return opts?.type !== undefined || Boolean(opts?.types?.length);
+}
+
 /**
  * v0.42.20.0 (Fix 3, #1775) — bound the query-time embed so a stalled provider
  * (the user's zeroentropy case) fails over to keyword instead of hanging past
@@ -1148,6 +1153,7 @@ export async function hybridSearch(
   const explicitModality =
     opts?.crossModal && opts.crossModal !== 'auto' ? opts.crossModal : undefined;
   const earlyModality = explicitModality ?? suggestions.suggestedModality ?? 'text';
+  const explicitTypeFilter = hasExplicitTypeFilter(opts);
 
   // A preferred query can still be modality-ambiguous (for example, asking
   // what a meeting said about "the chart"). Resolve that narrow overlap before
@@ -1172,7 +1178,7 @@ export async function hybridSearch(
   }
   const preferredTypeModality = preResolvedPreferredModality ?? earlyModality;
   const preferredTypeSearchOpts: SearchOpts | null =
-    preferredTypeModality !== 'image' && suggestions.preferredTypes?.length
+    !explicitTypeFilter && preferredTypeModality !== 'image' && suggestions.preferredTypes?.length
       ? { ...searchOpts, types: suggestions.preferredTypes }
       : null;
   // D1 fix (fix/title-retrieval-arm): page-grain title candidate arm,
@@ -2097,6 +2103,10 @@ export async function hybridSearchCached(
   const cfgCached = mergedCfgCached ?? ((await import('../config.ts')).loadConfig()) ?? { engine: 'pglite' as const };
   const resolvedColCached = resolveEmbeddingColumn(opts, cfgCached);
   const isNonDefaultColumn = !isCacheSafe(resolvedColCached, cfgCached);
+  const explicitTypeFilter = hasExplicitTypeFilter(opts);
+  const preferredTypesForCache = explicitTypeFilter
+    ? undefined
+    : classifyQuery(query).preferredTypes;
 
   // Cache key carries the column + provider so different embedding spaces
   // never collide on the same `(source_id, query_text)` row.
@@ -2116,6 +2126,10 @@ export async function hybridSearchCached(
     // bare hybridSearch does (opts.detail ?? autoDetectDetail(query)) so an
     // auto-detected `high` query keys like an explicit `high` one.
     detail: opts?.detail ?? autoDetectDetail(query),
+    // v18: semantic lookup can match adjacent query text, so preferred and
+    // non-preferred candidate-generation paths need distinct cache rows.
+    // This one hash is reused for both lookup and writeback below.
+    preferredTypes: preferredTypesForCache,
   });
 
   // Cache decision: opts.useCache (explicit) wins over global config; global
@@ -2154,7 +2168,10 @@ export async function hybridSearchCached(
     Boolean(opts?.nearSymbol) ||
     isNonDefaultColumn ||
     adaptiveReturnOn ||
-    dateFiltered;
+    dateFiltered ||
+    // Explicit type/type-list filters are hard result constraints. The cache
+    // key does not encode their values, so never consult or write semantic rows.
+    explicitTypeFilter;
 
   let cacheStatus: 'hit' | 'miss' | 'disabled' = skipCache ? 'disabled' : 'miss';
   let cacheSimilarity: number | undefined;

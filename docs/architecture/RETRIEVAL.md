@@ -125,7 +125,11 @@ additional bounded typed recall arm under the caller's existing source scope,
 combines its keyword/title candidates and its reused-query-embedding vector
 candidates into one list, then gives that list one neutral RRF vote. If the
 embedding provider is absent or fails, the typed lexical candidates still
-participate; image-only queries skip the arm.
+participate; image-only queries skip the arm. Explicit caller `type`/`types`
+constraints are hard filters and suppress the preferred arm. Semantic cache
+rows include the canonical preferred-type signature so adjacent preferred and
+non-preferred queries cannot cross-hit; requests with explicit hard type
+filters skip semantic caching because those filter values are not in the key.
 
 ## Multi-query expansion
 

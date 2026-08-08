@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { hybridSearch } from '../../src/core/search/hybrid.ts';
+import type { PageType } from '../../src/core/types.ts';
 import {
   __setChatTransportForTests,
   __setEmbedTransportForTests,
@@ -148,6 +149,50 @@ async function seedMarketCorpus(): Promise<string[]> {
 }
 
 describe('hybridSearch preferred-type recall', () => {
+  test('explicit scalar and list type filters win without preferred typed lookups', async () => {
+    const allowed = await seedMarketCorpus();
+
+    const hardFilters: Array<{ type: PageType } | { types: PageType[] }> = [
+      { type: 'email' },
+      { types: ['email'] },
+    ];
+    for (const hardFilter of hardFilters) {
+      const originalSearchKeyword = engine.searchKeyword.bind(engine);
+      const originalSearchTitles = engine.searchTitles.bind(engine);
+      const originalSearchVector = engine.searchVector.bind(engine);
+      let preferredTypedCalls = 0;
+      const isPreferredLookup = (types: readonly string[] | undefined): boolean =>
+        types?.join(',') === 'market-weekly';
+      engine.searchKeyword = async (query, opts) => {
+        if (isPreferredLookup(opts?.types)) preferredTypedCalls += 1;
+        return originalSearchKeyword(query, opts);
+      };
+      engine.searchTitles = async (query, opts) => {
+        if (isPreferredLookup(opts?.types)) preferredTypedCalls += 1;
+        return originalSearchTitles(query, opts);
+      };
+      engine.searchVector = async (embedding, opts) => {
+        if (isPreferredLookup(opts?.types)) preferredTypedCalls += 1;
+        return originalSearchVector(embedding, opts);
+      };
+
+      try {
+        const results = await hybridSearch(
+          engine,
+          'What happened in the market last week?',
+          { ...searchOpts(allowed), ...hardFilter },
+        );
+        expect(results.length).toBeGreaterThan(0);
+        expect(results.every((result) => result.type === 'email')).toBe(true);
+        expect(preferredTypedCalls).toBe(0);
+      } finally {
+        engine.searchKeyword = originalSearchKeyword;
+        engine.searchTitles = originalSearchTitles;
+        engine.searchVector = originalSearchVector;
+      }
+    }
+  });
+
   test('effective image-only modality suppresses every preferred-type lookup', async () => {
     await engine.setConfig('search.cross_modal.llm_intent', 'true');
     __setChatTransportForTests(async () => ({
