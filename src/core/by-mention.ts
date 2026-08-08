@@ -99,6 +99,14 @@ export interface FindMentionsOpts {
   fromSlug: string;
   /** Source id of the page being scanned. Used for cross-source guard. */
   fromSourceId: string;
+  /**
+   * Cross-source mentions (config `link_resolution.cross_source_mentions`,
+   * default off). When set, a mention may link across sources iff BOTH the
+   * scanned page's source and the entity's source are in this federated
+   * set — isolated sources stay walled off in both directions. When
+   * undefined, the v1 same-source-only behavior applies unchanged.
+   */
+  crossSourceFederated?: ReadonlySet<string>;
 }
 
 // ============================================================
@@ -383,14 +391,20 @@ export async function buildGazetteer(
   for (const r of rows) {
     if (r.title) existingTitles.add(r.title);
   }
-  const ignoreSet = new Set<string>([...DEFAULT_IGNORE_LIST, ...(opts.extraIgnore ?? [])]);
+  const defaultIgnore = new Set<string>(DEFAULT_IGNORE_LIST);
+  // User-supplied entries are authoritative: they drop the name even when an
+  // entity page with that exact title exists. (The DEFAULT list's
+  // page-existence escape made it inert for exactly the rows that reach this
+  // loop — every row IS a page — so ambiguous titles could never be excluded.)
+  const userIgnore = new Set<string>(opts.extraIgnore ?? []);
 
   const gazetteer: Gazetteer = new Map();
   for (const row of rows) {
     if (!row.title) continue;
     if (!hasCJK(row.title) && row.title.length < MIN_NAME_LENGTH) continue;
     if (hasCJK(row.title) && cjkCharCount(row.title) < MIN_CJK_NAME_LENGTH) continue;
-    if (ignoreSet.has(row.title) && !existingTitles.has(row.title)) continue;
+    if (userIgnore.has(row.title)) continue;
+    if (defaultIgnore.has(row.title) && !existingTitles.has(row.title)) continue;
 
     const tokens = tokenizeTitle(row.title);
     if (tokens.length === 0) continue;
@@ -499,8 +513,11 @@ export function findMentionedEntities(
       continue;
     }
     if (matched.source_id !== opts.fromSourceId) {
-      i += matchedTokens;
-      continue;
+      const fed = opts.crossSourceFederated;
+      if (!fed || !fed.has(matched.source_id) || !fed.has(opts.fromSourceId)) {
+        i += matchedTokens;
+        continue;
+      }
     }
     if (seenSlugs.has(matched.slug)) {
       i += matchedTokens;
@@ -518,4 +535,36 @@ export function findMentionedEntities(
   }
 
   return out;
+}
+
+// ============================================================
+// Config resolution (mirrors isGlobalBasenameEnabled in link-extraction.ts)
+// ============================================================
+
+/**
+ * Read the `link_resolution.cross_source_mentions` flag. Defaults to FALSE
+ * (opt-in only; v1 same-source isolation is preserved for existing brains).
+ * Resolution: env `GBRAIN_LINK_RESOLUTION_CROSS_SOURCE_MENTIONS` > DB plane
+ * via `engine.getConfig` > false.
+ */
+export async function isCrossSourceMentionsEnabled(engine: BrainEngine): Promise<boolean> {
+  const envVal = process.env.GBRAIN_LINK_RESOLUTION_CROSS_SOURCE_MENTIONS;
+  if (envVal != null) {
+    return ['1', 'true', 'yes', 'on'].includes(envVal.trim().toLowerCase());
+  }
+  const val = await engine.getConfig('link_resolution.cross_source_mentions');
+  if (val == null) return false;
+  return ['1', 'true', 'yes', 'on'].includes(val.trim().toLowerCase());
+}
+
+/**
+ * Read `link_resolution.mention_ignore` — a comma-separated list of exact
+ * entity titles the mention scanner must never link (ambiguous single-token
+ * names like first names). Fed to `buildGazetteer`'s `extraIgnore`, where
+ * user entries are authoritative (dropped even when the entity page exists).
+ */
+export async function getMentionIgnoreList(engine: BrainEngine): Promise<string[]> {
+  const val = await engine.getConfig('link_resolution.mention_ignore');
+  if (!val) return [];
+  return val.split(',').map((s) => s.trim()).filter(Boolean);
 }

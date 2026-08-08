@@ -53,7 +53,7 @@ import { pathToSlug, slugifyPath, pruneDir, isSyncable } from '../core/sync.ts';
 import { withRetry, isRetryableConnError } from '../core/retry.ts';
 export { withRetry };
 export type { WithRetryOpts } from '../core/retry.ts';
-import { buildGazetteer, findMentionedEntities } from '../core/by-mention.ts';
+import { buildGazetteer, findMentionedEntities, isCrossSourceMentionsEnabled, getMentionIgnoreList } from '../core/by-mention.ts';
 import {
   loadOpCheckpoint, recordCompleted, clearOpCheckpoint, mentionsFingerprint,
 } from '../core/op-checkpoint.ts';
@@ -1962,7 +1962,20 @@ async function extractMentionsFromDb(
 
   // Build gazetteer once per run. Skip everything if there are no
   // linkable entities — vacuous truth, no mentions to find.
-  const gazetteer = await buildGazetteer(engine);
+  // Cross-source mentions (opt-in, config-gated): when enabled, mentions may
+  // link across federated sources; isolated sources stay walled off. The
+  // exclusion list drops ambiguous titles at gazetteer build.
+  const crossSourceEnabled = await isCrossSourceMentionsEnabled(engine);
+  const mentionIgnore = await getMentionIgnoreList(engine);
+  const crossSourceFederated = crossSourceEnabled
+    ? new Set(
+        (await engine.executeRaw<{ id: string }>(
+          `SELECT id FROM sources WHERE config->>'federated' = 'true' AND archived IS NOT TRUE`,
+          [],
+        )).map((r) => r.id),
+      )
+    : undefined;
+  const gazetteer = await buildGazetteer(engine, { extraIgnore: mentionIgnore });
   if (gazetteer.size === 0) {
     if (jsonMode) {
       process.stdout.write(JSON.stringify({ event: 'no_gazetteer', message: 'no linkable entity pages found; nothing to scan' }) + '\n');
@@ -1978,6 +1991,10 @@ async function extractMentionsFromDb(
   // entities silently (codex flag).
   const gazetteerHash = createHash('sha256')
     .update([...gazetteer.keys()].sort().join('|'))
+    // Flag participates in the fingerprint: flipping cross_source_mentions
+    // mid-pause must invalidate the checkpoint, or resumed pages would keep
+    // the old guard behavior silently.
+    .update(crossSourceEnabled ? '|cross-source-on' : '|cross-source-off')
     .digest('hex')
     .slice(0, 8);
 
@@ -2097,6 +2114,7 @@ async function extractMentionsFromDb(
     const mentions = findMentionedEntities(body, gazetteer, {
       fromSlug: slug,
       fromSourceId: source_id,
+      crossSourceFederated,
     });
 
     if (mentions.length === 0) {
