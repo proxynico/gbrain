@@ -1975,43 +1975,44 @@ export async function hybridSearch(
   const rerankerOutput = rerankerOpts.enabled
     ? await applyReranker(query, coveredBeforeRerank, rerankerOpts as any)
     : coveredBeforeRerank;
-  // A successful reranker may demote or truncate selected coverage. Reapply
-  // the same pure ordering contract afterward while retaining its ordering for
-  // every non-selected result. On reranker failure this is an idempotent no-op.
-  const reranked = applyPreferredTypeCoverage(
-    rerankerOutput,
-    preferredTypeWinners,
-    coveredBeforeRerank,
-  );
 
   // T3 — free-text alias hop. Runs AFTER rerank so a query that is a page's
   // declared chosen name reliably surfaces that page regardless of how the
   // reranker scored body chunks. Fail-open on pre-v110 brains.
-  const aliasHopped = await applyAliasHop(engine, reranked, query, {
+  const aliasHopped = await applyAliasHop(engine, rerankerOutput, query, {
     sourceId: opts?.sourceId,
     sourceIds: opts?.sourceIds,
   });
+  // A successful reranker may demote or truncate selected coverage, while the
+  // alias hop re-sorts by score. Reapply the same pure ordering contract after
+  // both so preferred placement is final while every non-selected result keeps
+  // its relative order. On non-preferred queries this is a no-op.
+  const coveredAfterAlias = applyPreferredTypeCoverage(
+    aliasHopped,
+    preferredTypeWinners,
+    coveredBeforeRerank,
+  );
 
   // T4 — stamp evidence + create_safety so the agent's don't-duplicate
   // decision keys off WHY a page matched, not a raw blended score. Stamp on
-  // the full alias-hopped set before any adaptive trim so the kept results
+  // the full covered set before any adaptive trim so the kept results
   // carry evidence regardless of where the cap lands.
-  stampEvidence(aliasHopped);
+  stampEvidence(coveredAfterAlias);
 
   // v0.42 — intent-aware adaptive return-sizing (opt-in, default off). Trim
   // the ranked candidate set to an intent-driven cap BEFORE the limit slice,
   // and only on the first page (offset===0) — paginating a confidence-gated
   // set is incoherent, so paginated calls fall through to the fixed limit.
-  // Runs on the alias-hopped set so an alias-injected page (top-of-organic)
-  // survives the trim.
+  // Runs on the alias-hopped, preferred-covered set so selected results survive
+  // the trim.
   const adaptiveCfg = resolveAdaptiveReturn(
     opts?.adaptiveReturn,
     adaptiveReturnFromConfig(cfgForColumn as Record<string, unknown> | null),
   );
-  let returnPool = aliasHopped;
+  let returnPool = coveredAfterAlias;
   let adaptiveDecision: AdaptiveReturnDecision | undefined;
   if (adaptiveCfg.enabled && offset === 0) {
-    const r = applyAdaptiveReturn(aliasHopped, suggestions.intent, adaptiveCfg);
+    const r = applyAdaptiveReturn(coveredAfterAlias, suggestions.intent, adaptiveCfg);
     returnPool = r.kept;
     adaptiveDecision = r.decision;
   }

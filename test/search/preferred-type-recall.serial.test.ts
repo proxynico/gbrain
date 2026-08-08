@@ -323,6 +323,33 @@ describe('hybridSearch preferred-type recall', () => {
     }
   });
 
+  test('preferred weekly coverage remains final when a short query exactly matches an ordinary alias', async () => {
+    const allowed = await seedMarketCorpus();
+    await seedPage({
+      sourceId: 'bulk-mail',
+      slug: 'notes/ordinary-market-alias-owner',
+      type: 'note',
+      title: 'Ordinary Alias Owner',
+      body: 'Archived operations reference with no current freight commentary.',
+    });
+    await engine.setPageAliases(
+      'notes/ordinary-market-alias-owner',
+      'bulk-mail',
+      ['market last week'],
+    );
+
+    const results = await hybridSearch(
+      engine,
+      'market last week',
+      searchOpts(allowed),
+    );
+
+    expect(results[0]?.slug).toBe('reports/freight-digest-2026-w31');
+    expect(results[1]?.slug).toBe('notes/ordinary-market-alias-owner');
+    expect(results[1]?.alias_hit).toBe(true);
+    expect(embedCalls).toBe(1);
+  });
+
   test('preferred lexical candidates survive an embedding-provider outage', async () => {
     const allowed = await seedMarketCorpus();
     __setEmbedTransportForTests(async ({ values }: { values: string[] }) => {
