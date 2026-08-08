@@ -117,6 +117,16 @@ specific miss with `gbrain search diagnose "<q>" --target <slug>`.
 
 The classifier is deterministic (no LLM call). Wrong classification degrades gracefully — the hybrid stack still works without it.
 
+Two narrow query shapes also emit a preferred page-type hint: market queries
+bounded to last or this week prefer `market-weekly`, while meeting/call queries
+asking for exact words prefer `meeting` and `transcript`. The hint does not
+filter the ordinary vector, keyword, or title arms. Hybrid search runs one
+additional bounded typed recall arm under the caller's existing source scope,
+combines its keyword/title candidates and its reused-query-embedding vector
+candidates into one list, then gives that list one neutral RRF vote. If the
+embedding provider is absent or fails, the typed lexical candidates still
+participate; image-only queries skip the arm.
+
 ## Multi-query expansion
 
 For `detail: 'high'` searches, `src/core/search/expansion.ts` runs a Haiku-class LLM call to produce 2-3 query variants. Each variant runs through the full hybrid stack; results merge via RRF. Catches synonym misses without recall loss.
@@ -138,6 +148,7 @@ hybrid recall + fusion:
    ├── vector  (HNSW on chunk embeddings, per-page max-pool)
    ├── keyword (BM25 via tsvector)
    ├── title-phrase arm
+   ├── preferred type (one typed keyword/title/vector recall arm for matching intents)
    ├── relational (typed-edge recall arm — relational queries only)
    ├── source-aware re-rank (CASE in SQL)
    └── RRF fusion → cosine re-score → post-fusion boosts

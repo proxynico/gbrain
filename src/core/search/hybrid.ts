@@ -35,7 +35,12 @@ import { buildRelationalArm } from './relational-recall.ts';
 import { loadConfigWithEngine } from '../config.ts';
 import { dedupResults } from './dedup.ts';
 import { applyReranker } from './rerank.ts';
-import { autoDetectDetail, classifyQuery, isAmbiguousModalityQuery } from './query-intent.ts';
+import {
+  autoDetectDetail,
+  classifyQuery,
+  isAmbiguousModalityQuery,
+  type ModalityMode,
+} from './query-intent.ts';
 import { isTitlePhraseMatch } from './title-match.ts';
 import { normalizeAlias } from './alias-normalize.ts';
 import { stampEvidence } from './evidence.ts';
@@ -1140,9 +1145,36 @@ export async function hybridSearch(
   // We classify modality early (it's also computed after for the modality
   // branch). The classification is pure regex via classifyQuery; running it
   // here is cheap.
-  const earlyModality = (opts?.crossModal && opts.crossModal !== 'auto')
-    ? opts.crossModal
-    : (suggestions.suggestedModality ?? 'text');
+  const explicitModality =
+    opts?.crossModal && opts.crossModal !== 'auto' ? opts.crossModal : undefined;
+  const earlyModality = explicitModality ?? suggestions.suggestedModality ?? 'text';
+
+  // A preferred query can still be modality-ambiguous (for example, asking
+  // what a meeting said about "the chart"). Resolve that narrow overlap before
+  // issuing typed lexical work so an LLM image-only decision cannot leak a
+  // preferred text arm into the effective image path. Keep the resolved value
+  // for the main modality branch below so the tie-break still runs at most once.
+  let preResolvedPreferredModality: ModalityMode | undefined;
+  if (
+    suggestions.preferredTypes?.length &&
+    explicitModality === undefined &&
+    earlyModality === 'text' &&
+    resolvedMode.cross_modal_llm_intent &&
+    isAmbiguousModalityQuery(query)
+  ) {
+    preResolvedPreferredModality = 'text';
+    try {
+      const { classifyModalityWithLLM } = await import('./llm-intent.ts');
+      preResolvedPreferredModality = await classifyModalityWithLLM(query, 'text');
+    } catch {
+      // Fail-open: the text fallback set above stands.
+    }
+  }
+  const preferredTypeModality = preResolvedPreferredModality ?? earlyModality;
+  const preferredTypeSearchOpts: SearchOpts | null =
+    preferredTypeModality !== 'image' && suggestions.preferredTypes?.length
+      ? { ...searchOpts, types: suggestions.preferredTypes }
+      : null;
   // D1 fix (fix/title-retrieval-arm): page-grain title candidate arm,
   // fetched CONCURRENTLY with the keyword arm (Reviewer F7 — independent
   // engine queries). The chunk FTS vector never includes the page title, so
@@ -1154,9 +1186,14 @@ export async function hybridSearch(
   // SIGNAL (Reviewer F2): a SQL error (e.g. a pre-search_vector brain)
   // degrades to no title candidates, but warns once per process so a
   // broken engine arm cannot ship dark.
-  const [keywordResults, titleResults]: [SearchResult[], SearchResult[]] =
+  const [
+    keywordResults,
+    titleResults,
+    preferredTypeKeywordResults,
+    preferredTypeTitleResults,
+  ]: [SearchResult[], SearchResult[], SearchResult[], SearchResult[]] =
     earlyModality === 'image'
-      ? [[], []]
+      ? [[], [], [], []]
       : await Promise.all([
           engine.searchKeyword(query, searchOpts),
           engine.searchTitles(query, searchOpts).catch((err: unknown) => {
@@ -1167,7 +1204,41 @@ export async function hybridSearch(
             );
             return [] as SearchResult[];
           }),
+          preferredTypeSearchOpts
+            ? engine.searchKeyword(query, preferredTypeSearchOpts).catch((err: unknown) => {
+                warnOncePerProcess(
+                  'search-preferred-types-keyword-arm-failed',
+                  `[gbrain] preferred-types keyword arm failed (fail-open, typed candidates skipped): ` +
+                    `${err instanceof Error ? err.message : String(err)}`,
+                );
+                return [] as SearchResult[];
+              })
+            : Promise.resolve([] as SearchResult[]),
+          preferredTypeSearchOpts
+            ? engine.searchTitles(query, preferredTypeSearchOpts).catch((err: unknown) => {
+                warnOncePerProcess(
+                  'search-preferred-types-title-arm-failed',
+                  `[gbrain] preferred-types title arm failed (fail-open, typed title candidates skipped): ` +
+                    `${err instanceof Error ? err.message : String(err)}`,
+                );
+                return [] as SearchResult[];
+              })
+            : Promise.resolve([] as SearchResult[]),
         ]);
+
+  let preferredTypeVectorResults: SearchResult[] = [];
+  const fusePreferredTypeCandidates = (): SearchResult[] => {
+    const lists = [
+      preferredTypeKeywordResults,
+      preferredTypeTitleResults,
+      preferredTypeVectorResults,
+    ].filter((list) => list.length > 0);
+    if (lists.length === 0) return [];
+    if (lists.length === 1) return lists[0];
+    const k = opts?.rrfK ?? RRF_K;
+    return rrfFusionWeighted(lists.map((list) => ({ list, k })), false);
+  };
+  let preferredTypeList = fusePreferredTypeCandidates();
 
   // v0.29.1: resolve salience/recency from caller (back-compat aliases for
   // PR #618's `recencyBoost` numeric scale) or fall back to the heuristic.
@@ -1272,11 +1343,18 @@ export async function hybridSearch(
     // chunk-grain keyword FTS alone fails (D1).
     // issue #160: stamp unverified stubs BEFORE fusion so the compiled-truth
     // boost skips them (flag survives fusion's result spread).
-    await stampUnverifiedExtractions(engine, [...keywordResults, ...titleResults, ...relationalList]);
+    await stampUnverifiedExtractions(engine, [
+      ...preferredTypeList,
+      ...keywordResults,
+      ...titleResults,
+      ...relationalList,
+    ]);
     let noEmbedResults = keywordResults;
-    if (relationalList.length > 0 || titleResults.length > 0) {
+    if (preferredTypeList.length > 0 || relationalList.length > 0 || titleResults.length > 0) {
       const fk = opts?.rrfK ?? RRF_K;
-      const noEmbedLists = [{ list: keywordResults, k: fk }];
+      const noEmbedLists: Array<{ list: SearchResult[]; k: number }> = [];
+      if (preferredTypeList.length > 0) noEmbedLists.push({ list: preferredTypeList, k: fk });
+      noEmbedLists.push({ list: keywordResults, k: fk });
       if (titleResults.length > 0) noEmbedLists.push({ list: titleResults, k: fk });
       if (relationalList.length > 0) noEmbedLists.push({ list: relationalList, k: fk });
       noEmbedResults = rrfFusionWeighted(noEmbedLists, shouldBoostCompiledTruth(detailResolved));
@@ -1343,15 +1421,15 @@ export async function hybridSearch(
   // Commit 4 (LLM intent escalation): when search.cross_modal.llm_intent
   // is true AND regex returned 'text' AND isAmbiguousModalityQuery fires,
   // await a Haiku tie-break. Fail-open to regex result on any error.
-  const explicitModality =
-    opts?.crossModal && opts.crossModal !== 'auto' ? opts.crossModal : undefined;
-  let regexModality = explicitModality ?? suggestions.suggestedModality ?? 'text';
+  let regexModality =
+    preResolvedPreferredModality ?? explicitModality ?? suggestions.suggestedModality ?? 'text';
   // LLM tie-break fires ONLY when:
   //   - no explicit per-call override
   //   - regex returned 'text' (not confident image/both)
   //   - operator opted in via search.cross_modal.llm_intent
   //   - isAmbiguousModalityQuery says the query is genuinely ambiguous
   if (
+    preResolvedPreferredModality === undefined &&
     explicitModality === undefined &&
     regexModality === 'text' &&
     resolvedMode.cross_modal_llm_intent &&
@@ -1605,6 +1683,27 @@ export async function hybridSearch(
     }
   }
 
+  // Preferred types are a recall hint, not a hard filter. Reuse the already
+  // computed query embedding for one bounded typed vector lookup, then collapse
+  // keyword/title/vector typed evidence into ONE outer RRF arm so a preference
+  // cannot receive three independent votes. Lexical candidates above still
+  // survive when embedding is unavailable or this extra engine arm fails.
+  if (queryEmbedding && preferredTypeSearchOpts) {
+    const typedVectorOpts: SearchOpts = unifiedDone
+      ? { ...preferredTypeSearchOpts, embeddingColumn: 'embedding_multimodal' }
+      : preferredTypeSearchOpts;
+    preferredTypeVectorResults = await engine.searchVector(queryEmbedding, typedVectorOpts)
+      .catch((err: unknown) => {
+        warnOncePerProcess(
+          'search-preferred-types-vector-arm-failed',
+          `[gbrain] preferred-types vector arm failed (fail-open, typed vector candidates skipped): ` +
+            `${err instanceof Error ? err.message : String(err)}`,
+        );
+        return [] as SearchResult[];
+      });
+    preferredTypeList = fusePreferredTypeCandidates();
+  }
+
   if (vectorLists.length === 0) {
     // Embed/vector failed silently; record that vector did not run.
     // v0.29.1 codex pass-2 #4: this is the third return path. Apply
@@ -1615,11 +1714,18 @@ export async function hybridSearch(
     // here too (same rationale as the no-embedding-provider path — D1).
     // issue #160: stamp unverified stubs BEFORE fusion (see the
     // no-embedding-provider path for rationale).
-    await stampUnverifiedExtractions(engine, [...keywordResults, ...titleResults, ...relationalList]);
+    await stampUnverifiedExtractions(engine, [
+      ...preferredTypeList,
+      ...keywordResults,
+      ...titleResults,
+      ...relationalList,
+    ]);
     let fallbackResults = keywordResults;
-    if (relationalList.length > 0 || titleResults.length > 0) {
+    if (preferredTypeList.length > 0 || relationalList.length > 0 || titleResults.length > 0) {
       const fk = opts?.rrfK ?? RRF_K;
-      const fallbackLists = [{ list: keywordResults, k: fk }];
+      const fallbackLists: Array<{ list: SearchResult[]; k: number }> = [];
+      if (preferredTypeList.length > 0) fallbackLists.push({ list: preferredTypeList, k: fk });
+      fallbackLists.push({ list: keywordResults, k: fk });
       if (titleResults.length > 0) fallbackLists.push({ list: titleResults, k: fk });
       if (relationalList.length > 0) fallbackLists.push({ list: relationalList, k: fk });
       fallbackResults = rrfFusionWeighted(fallbackLists, shouldBoostCompiledTruth(detail));
@@ -1682,7 +1788,7 @@ export async function hybridSearch(
   const imageRrfK = effectiveRrfK(baseRrfK, resolvedMode.cross_modal_both_image_weight);
   const isBothMode = effectiveModality === 'both' && vectorLists.length >= 2;
 
-  const allLists: Array<{ list: SearchResult[]; k: number }> = isBothMode
+  const normalLists: Array<{ list: SearchResult[]; k: number }> = isBothMode
     ? [
       // Last list in vectorLists is the image branch (we appended it above).
       // All preceding lists (1 or more text-query embeddings if expansion ran)
@@ -1695,6 +1801,11 @@ export async function hybridSearch(
       ...vectorLists.map(list => ({ list, k: vectorK })),
       { list: keywordResults, k: keywordK },
     ];
+  const allLists: Array<{ list: SearchResult[]; k: number }> = [];
+  if (preferredTypeList.length > 0) {
+    allLists.push({ list: preferredTypeList, k: baseRrfK });
+  }
+  allLists.push(...normalLists);
 
   // D1 fix (fix/title-retrieval-arm) — title candidate arm as a third
   // weighted list. Fuses at the keyword arm's intent-effective k (same

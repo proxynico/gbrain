@@ -800,7 +800,13 @@ export function attributeKnob<K extends keyof ModeBundle>(
 // degraded:[{stage:'cache_prestamp'}] at hit time (belt-and-braces).
 // (Merge note: both this wave and master's #3515 wave claimed v=16 in
 // flight; the merge sequences them as 16 then 17.)
-export const KNOBS_HASH_VERSION = 17;
+// bump 17→18: matching market-week and quote-recall queries now add one
+// preferred-type recall arm. Candidate generation changes even though the
+// resolved mode knobs do not, so pre-change ranked rows must be unreachable.
+// Same one-time global cold-miss pattern; refills within cache.ttl_seconds.
+// (Rebase note: this local nicobrain arm claimed v=16 on 0.45.9; upstream's
+// #3515 and WP2/T3 waves took 16 and 17, so it sequences here as 18.)
+export const KNOBS_HASH_VERSION = 18;
 
 /**
  * v0.36 (D8 / CDX-2) — second-arg context for the cache key. The
@@ -1229,4 +1235,3 @@ export async function loadSearchModeConfig(
     overrides: loadOverridesFromConfig(configMap),
   };
 }
-

@@ -163,3 +163,23 @@ describe('classifyQuery — orthogonality of axes', () => {
     expect(r.suggestedSalience).toBe('off');
   });
 });
+
+describe('classifyQuery — preferred retrieval types', () => {
+  test('market query for a closed or current week prefers weekly market pages', () => {
+    expect(classifyQuery('What happened in the market last week?').preferredTypes)
+      .toEqual(['market-weekly']);
+    expect(classifyQuery('What changed in the market this week?').preferredTypes)
+      .toEqual(['market-weekly']);
+  });
+
+  test('quote-recall meeting query prefers curated meeting pages and raw transcripts', () => {
+    expect(classifyQuery('What was actually said at the Acme kickoff meeting?').preferredTypes)
+      .toEqual(['meeting', 'transcript']);
+    expect(classifyQuery('Give me the exact words from the Acme call').preferredTypes)
+      .toEqual(['meeting', 'transcript']);
+  });
+
+  test('generic time language does not prefer a page type', () => {
+    expect(classifyQuery('What happened last week?').preferredTypes).toBeUndefined();
+  });
+});

@@ -24,6 +24,8 @@
  * Pure module. No DB, no LLM, no async. Tested in test/query-intent.test.ts.
  */
 
+import type { PageType } from '../types.ts';
+
 export type QueryIntent = 'entity' | 'temporal' | 'event' | 'general';
 
 export type SalienceMode = 'off' | 'on' | 'strong';
@@ -53,6 +55,8 @@ export interface QuerySuggestions {
   suggestedRecency: RecencyMode;
   /** v0.36 — cross-modal routing axis. Defaults to 'text' when nothing matches. */
   suggestedModality: ModalityMode;
+  /** Narrow page-type preference used to add recall without filtering normal arms. */
+  preferredTypes?: PageType[];
 }
 
 // ─────────────────────────────────────────────────────────
@@ -180,6 +184,21 @@ const SALIENCE_ON_PATTERNS = [
   /\bwhat'?s\s+important\b/i,
 ];
 
+// Preferred-type recall hints. These are deliberately conjunctive so generic
+// temporal or meeting language does not narrow candidate generation.
+const MARKET_WEEK_PATTERNS = [
+  /\blast\s+week\b/i,
+  /\bthis\s+week\b/i,
+];
+
+const QUOTE_RECALL_PATTERNS = [
+  /\bactually\s+said\b/i,
+  /\bexactly\s+said\b/i,
+  /\bverbatim\b/i,
+  /\bexact\s+words\b/i,
+  /\btranscript\b/i,
+];
+
 // v0.36 cross-modal wave — modality-axis patterns (D6).
 //
 // CROSS_MODAL_PATTERNS fires the 'image' modality when the query explicitly
@@ -255,6 +274,13 @@ export function classifyQuery(query: string): QuerySuggestions {
   const hasRecencyOn = matches(RECENCY_ON_PATTERNS, query);
   const hasSalienceOn = matches(SALIENCE_ON_PATTERNS, query);
 
+  let preferredTypes: PageType[] | undefined;
+  if (/\bmarket\b/i.test(query) && matches(MARKET_WEEK_PATTERNS, query)) {
+    preferredTypes = ['market-weekly'];
+  } else if (/\b(meeting|call)\b/i.test(query) && matches(QUOTE_RECALL_PATTERNS, query)) {
+    preferredTypes = ['meeting', 'transcript'];
+  }
+
   // Recency axis
   let suggestedRecency: RecencyMode;
   if (hasCanonical && !hasTemporalBound) {
@@ -283,7 +309,14 @@ export function classifyQuery(query: string): QuerySuggestions {
   // can also produce 'both' via tie-break).
   const suggestedModality: ModalityMode = matches(CROSS_MODAL_PATTERNS, query) ? 'image' : 'text';
 
-  return { intent, suggestedDetail, suggestedSalience, suggestedRecency, suggestedModality };
+  return {
+    intent,
+    suggestedDetail,
+    suggestedSalience,
+    suggestedRecency,
+    suggestedModality,
+    preferredTypes,
+  };
 }
 
 /**
