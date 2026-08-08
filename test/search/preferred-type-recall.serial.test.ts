@@ -152,27 +152,32 @@ describe('hybridSearch preferred-type recall', () => {
   test('explicit scalar and list type filters win without preferred typed lookups', async () => {
     const allowed = await seedMarketCorpus();
 
-    const hardFilters: Array<{ type: PageType } | { types: PageType[] }> = [
-      { type: 'email' },
-      { types: ['email'] },
+    const cases: Array<{
+      hardFilter: { type: PageType } | { types: PageType[] };
+      expectedType: PageType;
+    }> = [
+      { hardFilter: { type: 'market-weekly' }, expectedType: 'market-weekly' },
+      { hardFilter: { types: ['email'] }, expectedType: 'email' },
     ];
-    for (const hardFilter of hardFilters) {
+    for (const { hardFilter, expectedType } of cases) {
       const originalSearchKeyword = engine.searchKeyword.bind(engine);
       const originalSearchTitles = engine.searchTitles.bind(engine);
       const originalSearchVector = engine.searchVector.bind(engine);
       let preferredTypedCalls = 0;
-      const isPreferredLookup = (types: readonly string[] | undefined): boolean =>
-        types?.join(',') === 'market-weekly';
+      const isPreferredLookup = (
+        type: string | undefined,
+        types: readonly string[] | undefined,
+      ): boolean => type === undefined && types?.join(',') === 'market-weekly';
       engine.searchKeyword = async (query, opts) => {
-        if (isPreferredLookup(opts?.types)) preferredTypedCalls += 1;
+        if (isPreferredLookup(opts?.type, opts?.types)) preferredTypedCalls += 1;
         return originalSearchKeyword(query, opts);
       };
       engine.searchTitles = async (query, opts) => {
-        if (isPreferredLookup(opts?.types)) preferredTypedCalls += 1;
+        if (isPreferredLookup(opts?.type, opts?.types)) preferredTypedCalls += 1;
         return originalSearchTitles(query, opts);
       };
       engine.searchVector = async (embedding, opts) => {
-        if (isPreferredLookup(opts?.types)) preferredTypedCalls += 1;
+        if (isPreferredLookup(opts?.type, opts?.types)) preferredTypedCalls += 1;
         return originalSearchVector(embedding, opts);
       };
 
@@ -183,7 +188,7 @@ describe('hybridSearch preferred-type recall', () => {
           { ...searchOpts(allowed), ...hardFilter },
         );
         expect(results.length).toBeGreaterThan(0);
-        expect(results.every((result) => result.type === 'email')).toBe(true);
+        expect(results.every((result) => result.type === expectedType)).toBe(true);
         expect(preferredTypedCalls).toBe(0);
       } finally {
         engine.searchKeyword = originalSearchKeyword;
