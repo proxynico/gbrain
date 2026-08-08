@@ -130,6 +130,13 @@ constraints are hard filters and suppress the preferred arm. Semantic cache
 rows include the canonical preferred-type signature so adjacent preferred and
 non-preferred queries cannot cross-hit; requests with explicit hard type
 filters skip semantic caching because those filter values are not in the key.
+From the fused typed list, search selects the first page-grain result for each
+preferred type by composite source-and-slug identity. The best selected page is
+rank 1; a second selected type remains where it is inside the first 15 or moves
+to rank 15. This bounded coverage pass runs before and after reranking,
+re-admits a selected fused candidate removed by dedup, and protects selected
+pages from autocut. It does not reorder the remaining results or add engine or
+embedding calls.
 
 ## Multi-query expansion
 

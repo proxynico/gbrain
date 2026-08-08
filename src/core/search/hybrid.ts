@@ -36,6 +36,11 @@ import { loadConfigWithEngine } from '../config.ts';
 import { dedupResults } from './dedup.ts';
 import { applyReranker } from './rerank.ts';
 import {
+  applyPreferredTypeCoverage,
+  isPreferredTypeWinner,
+  selectPreferredTypeWinners,
+} from './preferred-type-coverage.ts';
+import {
   autoDetectDetail,
   classifyQuery,
   isAmbiguousModalityQuery,
@@ -1252,6 +1257,10 @@ export async function hybridSearch(
     return rrfFusionWeighted(lists.map((list) => ({ list, k })), false);
   };
   let preferredTypeList = fusePreferredTypeCandidates();
+  let preferredTypeWinners = selectPreferredTypeWinners(
+    suggestions.preferredTypes ?? [],
+    preferredTypeList,
+  );
 
   // v0.29.1: resolve salience/recency from caller (back-compat aliases for
   // PR #618's `recencyBoost` numeric scale) or fall back to the heuristic.
@@ -1378,10 +1387,15 @@ export async function hybridSearch(
     }
     // T3/T4 — alias hop + evidence stamp even without an embedding provider
     // (the named-thing fix is most valuable exactly when vector is unavailable).
-    const noEmbedHopped = await applyAliasHop(engine, dedupResults(noEmbedResults), query, {
+    let noEmbedHopped = await applyAliasHop(engine, dedupResults(noEmbedResults), query, {
       sourceId: opts?.sourceId,
       sourceIds: opts?.sourceIds,
     });
+    noEmbedHopped = applyPreferredTypeCoverage(
+      noEmbedHopped,
+      preferredTypeWinners,
+      noEmbedResults,
+    );
     stampEvidence(noEmbedHopped);
     const noEmbedSliced = noEmbedHopped.slice(offset, offset + limit);
     // v0.32.3 search-lite: budget enforcement on the no-embedding-provider path.
@@ -1715,6 +1729,10 @@ export async function hybridSearch(
         return [] as SearchResult[];
       });
     preferredTypeList = fusePreferredTypeCandidates();
+    preferredTypeWinners = selectPreferredTypeWinners(
+      suggestions.preferredTypes ?? [],
+      preferredTypeList,
+    );
   }
 
   if (vectorLists.length === 0) {
@@ -1747,10 +1765,15 @@ export async function hybridSearch(
       await runPostFusionStages(engine, fallbackResults, postFusionOpts);
       fallbackResults.sort((a, b) => b.score - a.score);
     }
-    const kwHopped = await applyAliasHop(engine, dedupResults(fallbackResults), query, {
+    let kwHopped = await applyAliasHop(engine, dedupResults(fallbackResults), query, {
       sourceId: opts?.sourceId,
       sourceIds: opts?.sourceIds,
     });
+    kwHopped = applyPreferredTypeCoverage(
+      kwHopped,
+      preferredTypeWinners,
+      fallbackResults,
+    );
     stampEvidence(kwHopped);
     const kwSliced = kwHopped.slice(offset, offset + limit);
     // v0.32.3 search-lite: budget enforcement on the keyword-fallback path too.
@@ -1917,11 +1940,20 @@ export async function hybridSearch(
 
   // Dedup
   const deduped = dedupResults(fused, dedupOpts);
+  // Preferred types are a bounded coverage contract after candidate
+  // generation, not another score boost. Promote one page-grain winner per
+  // preferred type before reranking so tokenmax's topNIn sees the selected
+  // candidates; re-admit from the fused pool when dedup removed one.
+  const coveredBeforeRerank = applyPreferredTypeCoverage(
+    deduped,
+    preferredTypeWinners,
+    fused,
+  );
 
   // Auto-escalate: if detail=low returned 0, retry with high. The inner
   // call's onMeta fires with the escalated detail_resolved; do NOT also
   // fire here (would double-emit and capture stale meta).
-  if (deduped.length === 0 && opts?.detail === 'low') {
+  if (coveredBeforeRerank.length === 0 && opts?.detail === 'low') {
     return hybridSearch(engine, query, { ...opts, detail: 'high' });
   }
 
@@ -1940,9 +1972,17 @@ export async function hybridSearch(
     model: resolvedMode.reranker_model,
     timeoutMs: resolvedMode.reranker_timeout_ms,
   };
-  const reranked = rerankerOpts.enabled
-    ? await applyReranker(query, deduped, rerankerOpts as any)
-    : deduped;
+  const rerankerOutput = rerankerOpts.enabled
+    ? await applyReranker(query, coveredBeforeRerank, rerankerOpts as any)
+    : coveredBeforeRerank;
+  // A successful reranker may demote or truncate selected coverage. Reapply
+  // the same pure ordering contract afterward while retaining its ordering for
+  // every non-selected result. On reranker failure this is an idempotent no-op.
+  const reranked = applyPreferredTypeCoverage(
+    rerankerOutput,
+    preferredTypeWinners,
+    coveredBeforeRerank,
+  );
 
   // T3 — free-text alias hop. Runs AFTER rerank so a query that is a page's
   // declared chosen name reliably surfaces that page regardless of how the
@@ -1996,7 +2036,7 @@ export async function hybridSearch(
       // Preserve alias-hop exact matches: applyAliasHop injects the canonical
       // page AFTER reranking, so it has no rerank_score. Without this it would
       // be dropped whenever autocut cuts on the scored set (Codex P1).
-      (x) => x.alias_hit === true,
+      (x) => x.alias_hit === true || isPreferredTypeWinner(x, preferredTypeWinners),
     );
     returnPool = r.kept;
     autocutDecision = r.decision;

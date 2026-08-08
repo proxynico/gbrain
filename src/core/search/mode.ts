@@ -808,7 +808,11 @@ export function attributeKnob<K extends keyof ModeBundle>(
 // Same one-time global cold-miss pattern; refills within cache.ttl_seconds.
 // (Rebase note: this local nicobrain arm claimed v=16 on 0.45.9; upstream's
 // #3515 and WP2/T3 waves took 16 and 17, so it sequences here as 18.)
-export const KNOBS_HASH_VERSION = 18;
+//
+// bump 18→19: one selected page per classifier-preferred type now receives
+// bounded post-fusion placement before and after reranking, plus autocut
+// preservation. Final result order changes without a new hash field.
+export const KNOBS_HASH_VERSION = 19;
 
 /**
  * v0.36 (D8 / CDX-2) — second-arg context for the cache key. The

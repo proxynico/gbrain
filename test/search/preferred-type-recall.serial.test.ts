@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { hybridSearch } from '../../src/core/search/hybrid.ts';
-import type { PageType } from '../../src/core/types.ts';
+import type { PageType, SearchResult } from '../../src/core/types.ts';
 import {
   __setChatTransportForTests,
   __setEmbedTransportForTests,
@@ -146,6 +146,59 @@ async function seedMarketCorpus(): Promise<string[]> {
     body: 'what happened in the market last week '.repeat(12),
   });
   return allowed;
+}
+
+function syntheticResult(
+  slug: string,
+  type: PageType,
+  rank: number,
+  sourceId = 'synthetic-source',
+): SearchResult {
+  return {
+    slug,
+    source_id: sourceId,
+    page_id: 10_000 + rank,
+    title: slug,
+    type,
+    chunk_text: `${slug} unique retrieval document`,
+    chunk_source: 'compiled_truth',
+    chunk_id: 20_000 + rank,
+    chunk_index: 0,
+    score: 1 - rank / 10_000,
+    stale: false,
+  };
+}
+
+function installSyntheticSearchArms(preferred: SearchResult[]): {
+  ordinary: SearchResult[];
+  restore: () => void;
+} {
+  const ordinaryTypes = ['note', 'email', 'person', 'company'];
+  const ordinary = Array.from({ length: 60 }, (_, i) =>
+    syntheticResult(
+      `ordinary/result-${String(i).padStart(2, '0')}`,
+      ordinaryTypes[i % ordinaryTypes.length]!,
+      i,
+    ));
+  const preferredTypes = new Set(['market-weekly', 'meeting', 'transcript']);
+  const originalSearchKeyword = engine.searchKeyword.bind(engine);
+  const originalSearchTitles = engine.searchTitles.bind(engine);
+  const originalSearchVector = engine.searchVector.bind(engine);
+  const resultsFor = (types: readonly string[] | undefined): SearchResult[] =>
+    types?.some((type) => preferredTypes.has(type)) ? preferred : ordinary;
+
+  engine.searchKeyword = async (_query, opts) => resultsFor(opts?.types);
+  engine.searchTitles = async (_query, opts) => resultsFor(opts?.types);
+  engine.searchVector = async (_embedding, opts) => resultsFor(opts?.types);
+
+  return {
+    ordinary,
+    restore: () => {
+      engine.searchKeyword = originalSearchKeyword;
+      engine.searchTitles = originalSearchTitles;
+      engine.searchVector = originalSearchVector;
+    },
+  };
 }
 
 describe('hybridSearch preferred-type recall', () => {
@@ -363,6 +416,97 @@ describe('hybridSearch preferred-type recall', () => {
       expect(embedCalls).toBe(1);
     } finally {
       engine.searchVector = originalSearchVector;
+    }
+  });
+
+  test('tokenmax fail-open reranker input includes the weekly winner and returns it first', async () => {
+    const weekly = syntheticResult('reports/preferred-weekly', 'market-weekly', 100);
+    const { ordinary, restore } = installSyntheticSearchArms([weekly]);
+    let rerankerDocuments: string[] = [];
+    try {
+      const results = await hybridSearch(
+        engine,
+        'What happened in the market last week?',
+        {
+          ...searchOpts(['synthetic-source']),
+          mode: 'tokenmax',
+          limit: 50,
+          autocut: true,
+          reranker: {
+            enabled: true,
+            topNIn: 50,
+            topNOut: null,
+            rerankerFn: async (input) => {
+              rerankerDocuments = input.documents;
+              throw new Error('synthetic reranker outage');
+            },
+          },
+        },
+      );
+
+      expect(rerankerDocuments).toContain(weekly.chunk_text);
+      expect(results[0]?.slug).toBe(weekly.slug);
+      expect(results.filter((r) => r.slug.startsWith('ordinary/')).map((r) => r.slug))
+        .toEqual(ordinary.slice(0, 49).map((r) => r.slug));
+      expect(embedCalls).toBe(1);
+    } finally {
+      restore();
+    }
+  });
+
+  test('successful tokenmax rerank cannot drop or displace selected meeting coverage', async () => {
+    const meeting = syntheticResult('meetings/preferred-curated', 'meeting', 100);
+    const transcript = syntheticResult('transcripts/preferred-best', 'transcript', 101);
+    const transcriptDecoy = syntheticResult('transcripts/lower-ranked-decoy', 'transcript', 102);
+    const { restore } = installSyntheticSearchArms([meeting, transcript, transcriptDecoy]);
+    let rerankerDocuments: string[] = [];
+    let expectedNormalOrder: string[] = [];
+    let autocutApplied: boolean | undefined;
+    try {
+      const results = await hybridSearch(
+        engine,
+        'What was actually said at the kickoff meeting?',
+        {
+          ...searchOpts(['synthetic-source']),
+          mode: 'tokenmax',
+          limit: 50,
+          autocut: true,
+          onMeta: (meta) => { autocutApplied = meta.autocut?.applied; },
+          reranker: {
+            enabled: true,
+            topNIn: 50,
+            topNOut: null,
+            rerankerFn: async (input) => {
+              rerankerDocuments = input.documents;
+              const normalIndices = input.documents
+                .map((document, index) => ({ document, index }))
+                .filter(({ document }) => document.startsWith('ordinary/'))
+                .reverse();
+              expectedNormalOrder = normalIndices.map(({ document }) => document);
+              const preferredIndices = input.documents
+                .map((document, index) => ({ document, index }))
+                .filter(({ document }) => !document.startsWith('ordinary/'));
+              return [
+                ...normalIndices.map(({ index }, rank) => ({ index, relevanceScore: 0.9 - rank * 0.001 })),
+                ...preferredIndices.map(({ index }, rank) => ({ index, relevanceScore: 0.01 - rank * 0.001 })),
+              ];
+            },
+          },
+        },
+      );
+
+      expect(rerankerDocuments).toContain(meeting.chunk_text);
+      expect(rerankerDocuments).toContain(transcript.chunk_text);
+      expect(rerankerDocuments).not.toContain(transcriptDecoy.chunk_text);
+      expect(results[0]?.slug).toBe(meeting.slug);
+      expect(results.findIndex((r) => r.slug === transcript.slug) + 1).toBeLessThanOrEqual(15);
+      expect(results.findIndex((r) => r.slug === transcriptDecoy.slug)).toBe(-1);
+      expect(results.filter((r) => r.slug.startsWith('ordinary/')).map((r) => r.chunk_text))
+        .toEqual(expectedNormalOrder);
+      expect(autocutApplied).toBe(true);
+      expect(embedCalls).toBe(1);
+    } finally {
+      restore();
     }
   });
 });

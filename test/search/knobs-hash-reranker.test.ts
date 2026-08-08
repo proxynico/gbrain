@@ -44,7 +44,7 @@ function baseKnobs(): ResolvedSearchKnobs {
 }
 
 describe('KNOBS_HASH_VERSION + version invariants', () => {
-  test('version is 18 (…; 12→13 embedding-provider migration #3390; 14→15 FTS language; 15→16 detail fold #3515; 16→17 degradation stamp; 17→18 preferred-type recall)', () => {
+  test('version is 19 (…; 12→13 embedding-provider migration #3390; 14→15 FTS language; 15→16 detail fold #3515; 16→17 degradation stamp; 17→18 preferred-type recall; 18→19 preferred-type coverage)', () => {
     // v0.35.0.0: 1→2 to fold reranker fields. v0.35.6.0: 2→3 to fold
     // floor_ratio. v0.36 wave: piggybacks on v=3 with 7 cross-modal knobs
     // (D2) PLUS column + provider context (D8/CDX-2 cross-column isolation).
@@ -75,7 +75,8 @@ describe('KNOBS_HASH_VERSION + version invariants', () => {
     // write must not be served to a detail=medium lookup.
     // WP2/T3: 16→17 degradation-stamp epoch — cache rows now carry
     // degraded[]/retrieved_count; pre-stamp rows must not claim clean.
-    expect(KNOBS_HASH_VERSION).toBe(18);
+    // Preferred-type coverage: 18→19 because selected typed winners now have
+    expect(KNOBS_HASH_VERSION).toBe(19);
   });
 
   test('hash is 16 hex chars regardless of reranker config', () => {
