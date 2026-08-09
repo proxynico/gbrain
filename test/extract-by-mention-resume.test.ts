@@ -84,9 +84,14 @@ async function runByMention(args: string[]): Promise<void> {
 async function expectedGazetteerHash(): Promise<string> {
   // The gazetteer is built from entity pages by buildGazetteer; for tests
   // we just build it the same way the prod code does and hash sorted keys.
+  // The default-off cross-source mode is part of the production fingerprint.
   const { buildGazetteer } = await import('../src/core/by-mention.ts');
   const gz = await buildGazetteer(engine);
-  return createHash('sha256').update([...gz.keys()].sort().join('|')).digest('hex').slice(0, 8);
+  return createHash('sha256')
+    .update([...gz.keys()].sort().join('|'))
+    .update('|cross-source-off')
+    .digest('hex')
+    .slice(0, 8);
 }
 
 describe('by-mention checkpoint/resume (T5)', () => {
@@ -157,7 +162,7 @@ describe('by-mention checkpoint/resume (T5)', () => {
 
     const oldHash = createHash('sha256').update(
       ['acme corp', 'alice example'].sort().join('|'),
-    ).digest('hex').slice(0, 8);
+    ).update('|cross-source-off').digest('hex').slice(0, 8);
     const newHash = await expectedGazetteerHash();
     expect(newHash).not.toBe(oldHash);
 
