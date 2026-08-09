@@ -1705,7 +1705,7 @@ export class PGLiteEngine implements BrainEngine {
     if (filters?.sourceIds && filters.sourceIds.length > 0) {
       params.push(filters.sourceIds);
       where.push(`p.source_id = ANY($${params.length}::text[])`);
-    } else if (filters?.sourceId) {
+    } else if (filters?.sourceId !== undefined) {
       params.push(filters.sourceId);
       where.push(`p.source_id = $${params.length}`);
     }

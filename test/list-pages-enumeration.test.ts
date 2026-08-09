@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import type { PageInput } from '../src/core/types.ts';
+import { PAGE_SORT_SQL, type PageInput } from '../src/core/types.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
 let engine: PGLiteEngine;
@@ -41,6 +41,39 @@ async function putFixture(
 }
 
 describe('PGLite listPages exact enumeration', () => {
+  test('treats an explicit empty sourceId as a real filter that matches no rows', async () => {
+    await putFixture('pages/visible', {});
+
+    expect(await engine.listPages({ sourceId: '', sort: 'slug' })).toEqual([]);
+  });
+
+  test('slug pagination has deterministic tie-breakers across sources and rows', async () => {
+    expect(PAGE_SORT_SQL.slug).toBe('p.slug ASC, p.source_id ASC, p.id ASC');
+
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, config)
+       VALUES ($1, $2, $3::text::jsonb)`,
+      ['team-alpha', 'Team Alpha', JSON.stringify({ federated: false })],
+    );
+    await putFixture('messages/shared', {}, 'team-alpha');
+    await putFixture('messages/shared', {}, 'default');
+
+    const pages = await Promise.all([0, 1].map(async (offset) => {
+      const [page] = await engine.listPages({
+        sourceIds: ['default', 'team-alpha'],
+        sort: 'slug',
+        limit: 1,
+        offset,
+      });
+      return `${page.source_id}:${page.slug}`;
+    }));
+
+    expect(pages).toEqual([
+      'default:messages/shared',
+      'team-alpha:messages/shared',
+    ]);
+  });
+
   test('paginates all pages without duplicates or gaps', async () => {
     for (let index = 0; index < 125; index += 1) {
       const slug = `pages/page-${index.toString().padStart(3, '0')}`;
@@ -49,7 +82,12 @@ describe('PGLite listPages exact enumeration', () => {
 
     const batches = await Promise.all(
       [0, 40, 80, 120].map((offset) =>
-        engine.listPages({ limit: 40, offset, sort: 'slug' }),
+        engine.listPages({
+          slugPrefix: 'pages/page-',
+          limit: 40,
+          offset,
+          sort: 'slug',
+        }),
       ),
     );
     const slugs = batches.flat().map((page) => page.slug);

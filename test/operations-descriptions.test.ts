@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'fs';
+import { resolve } from 'path';
 import {
   GET_RECENT_SALIENCE_DESCRIPTION,
   FIND_ANOMALIES_DESCRIPTION,
@@ -89,6 +91,18 @@ describe('v0.29 — redirect hints on existing ops', () => {
     expect(operationsByName['list_pages'].description).toBe(LIST_PAGES_DESCRIPTION);
     expect(LIST_PAGES_DESCRIPTION).toContain("sort=updated_desc");
     expect(LIST_PAGES_DESCRIPTION).toContain("what did I touch this week");
+    expect(LIST_PAGES_DESCRIPTION).toContain('maximum 100');
+    expect(LIST_PAGES_DESCRIPTION).toContain('static source with no concurrent imports or writes');
+    expect(LIST_PAGES_DESCRIPTION).toContain('stable sort=slug with successive offsets');
+  });
+
+  test('public docs scope complete enumeration to a static source snapshot', () => {
+    const keyFiles = readFileSync(resolve(import.meta.dir, '../docs/architecture/KEY_FILES.md'), 'utf8');
+    const changelog = readFileSync(resolve(import.meta.dir, '../CHANGELOG.md'), 'utf8');
+    expect(keyFiles).toContain('completely enumerate a static source with no concurrent import or');
+    expect(keyFiles).toContain('`sort=slug` plus successive offsets');
+    expect(changelog).toContain('enumerate an exact static source snapshot');
+    expect(changelog).toContain('stable `sort=slug` pagination');
   });
 
   test('query redirects personal/emotional queries to the v0.29 ops', () => {
@@ -156,6 +170,14 @@ describe('v0.29 — subagent allow-list', () => {
     const op = operationsByName['list_pages'];
     expect(op.params.sort).toBeDefined();
     expect(op.params.updated_after).toBeDefined();
+  });
+
+  test('list_pages exposes the exact enumeration parameters', () => {
+    const op = operationsByName.list_pages;
+    expect(op.params.source_id).toBeDefined();
+    expect(op.params.slug_prefix).toBeDefined();
+    expect(op.params.frontmatter_filters).toBeDefined();
+    expect(op.params.frontmatter_fields).toBeDefined();
   });
 });
 

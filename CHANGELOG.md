@@ -2,6 +2,10 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## Unreleased
+
+- `list_pages` can now enumerate an exact static source snapshot with explicit `source_id`, literal `slug_prefix`, structured case-insensitive frontmatter filters, selected frontmatter projection, and stable `sort=slug` pagination. Local explicit limits remain unbounded; remote requests remain capped at 100 rows. Use successive offsets only while no import or write runs against the source.
+
 ## [0.46.2.0] - 2026-08-15
 
 **Dream synthesis now triages before it spends.**

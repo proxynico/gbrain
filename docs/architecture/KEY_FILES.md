@@ -8,6 +8,31 @@ lives in `CHANGELOG.md` + `git log` / `git blame`, NOT here. Do not append
 per-release `**vX.Y.Z:**` narration — CI enforces this
 (`scripts/check-key-files-current-state.sh`).
 
+`list_pages` keeps its plain-array response and 50-row default. Remote callers
+receive at most 100 rows per request; trusted local callers may request a larger
+explicit limit. Exact enumeration adds `source_id`, literal `slug_prefix`,
+structured `frontmatter_filters`, selected `frontmatter_fields`, and validated
+`offset`. To completely enumerate a static source with no concurrent import or
+write, use `sort=slug` plus successive offsets until fewer than `limit` rows are
+returned. The slug ordering is deterministic across duplicate slugs by
+`source_id` and page id. Unqualified local calls retain their federated source
+visibility; an explicit source narrows that scope and remote callers may select
+only a granted source. CLI structured values are JSON:
+
+```bash
+gbrain list --source-id email --sort slug --offset 100 \
+  --slug-prefix 'mail/' \
+  --frontmatter-filters '[{"field":"status","operator":"eq_ci","value":"active"}]' \
+  --frontmatter-fields '["status"]'
+```
+
+- `src/core/page-list-filters.ts` — validates the exact-enumeration offset,
+  frontmatter filters, and projected fields before either engine runs. Filters
+  are ANDed; `eq_ci` performs case-insensitive equality and `contains_any_ci`
+  matches any supplied case-insensitive substring against top-level string
+  fields only. Invalid, nested, sparse, or over-limit input fails as
+  `invalid_params`.
+
 - `docs/operations/conversation-parser-llm-fallback.md` — operator and maintainer contract for the default-off LLM parse fallback: exact config key, deterministic-first dispatch boundary, sampled data surface, untrusted-content prompt handling, page-date/cache-key coupling, timestamp validation, cache/checkpoint behavior, observability, limitations, and focused test commands.
 
 

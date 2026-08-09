@@ -10,6 +10,7 @@
  */
 import { describe, test, expect } from 'bun:test';
 import {
+  federatedSearchScope,
   resolveRequestedScope,
   resolveCodeIntelScope,
   thinkSourceScopeOpts,
@@ -108,6 +109,24 @@ describe('resolveRequestedScope — default (no param)', () => {
 
   test('falls back to scalar sourceId when no federated grant', () => {
     expect(resolveRequestedScope(ctxOf({ remote: true, sourceId: 'a' }), undefined)).toEqual({ sourceId: 'a' });
+  });
+});
+
+describe('federatedSearchScope — list_pages explicit narrowing', () => {
+  test('an explicit local source prevents ambient federation widening', () => {
+    expect(federatedSearchScope(ctxOf({
+      remote: false,
+      sourceId: 'default',
+      localFederatedSourceIds: ['default', 'email'],
+    }), 'email')).toEqual({ sourceId: 'email' });
+  });
+
+  test('an omitted source preserves the ambient federated visibility set', () => {
+    expect(federatedSearchScope(ctxOf({
+      remote: false,
+      sourceId: 'default',
+      localFederatedSourceIds: ['default', 'email'],
+    }))).toEqual({ sourceIds: ['default', 'email'] });
   });
 });
 

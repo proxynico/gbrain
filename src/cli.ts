@@ -27,7 +27,7 @@ import type { BrainEngine } from './core/engine.ts';
 import { operations, OperationError } from './core/operations.ts';
 import { resolveSourceIdEngineFree } from './core/source-resolver.ts';
 import { formatVolunteeredPage } from './core/context/volunteer.ts';
-import type { Operation, OperationContext } from './core/operations.ts';
+import type { Operation, OperationContext, ParamDef } from './core/operations.ts';
 import { shouldForceExitAfterMain, finishCliTeardown, flushThenExit, currentExitCode, setCliExitVerdict } from './core/cli-force-exit.ts';
 import { serializeMarkdown } from './core/markdown.ts';
 import { parseGlobalFlags, setCliOptions, getCliOptions } from './core/cli-options.ts';
@@ -963,6 +963,25 @@ export function resolveQueryImage(
   return { path: imagePath, base64, mime };
 }
 
+function parseCliParamValue(key: string, def: ParamDef | undefined, raw: string): unknown {
+  if (def?.type === 'number') return Number(raw);
+  if (def?.type !== 'array' && def?.type !== 'object') return raw;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`Invalid JSON for --${key.replace(/_/g, '-')}`);
+  }
+  if (def.type === 'array' && !Array.isArray(parsed)) {
+    throw new Error(`--${key.replace(/_/g, '-')} must be a JSON array`);
+  }
+  if (def.type === 'object' && (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))) {
+    throw new Error(`--${key.replace(/_/g, '-')} must be a JSON object`);
+  }
+  return parsed;
+}
+
 export function parseOpArgs(op: Operation, args: string[]): Record<string, unknown> {
   const params: Record<string, unknown> = {};
   const positional = op.cliHints?.positional || [];
@@ -1015,13 +1034,12 @@ export function parseOpArgs(op: Operation, args: string[]): Record<string, unkno
         // rehearsal request (the resurrected #2185 class the red team caught).
         params[key] = true;
       } else if (i + 1 < args.length) {
-        params[key] = args[++i];
-        if (paramDef?.type === 'number') params[key] = Number(params[key]);
+        params[key] = parseCliParamValue(key, paramDef, args[++i]);
       }
     } else if (posIdx < positional.length) {
       const key = positional[posIdx++];
       const paramDef = op.params[key];
-      params[key] = paramDef?.type === 'number' ? Number(arg) : arg;
+      params[key] = parseCliParamValue(key, paramDef, arg);
     }
   }
 

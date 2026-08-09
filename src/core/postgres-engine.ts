@@ -1518,7 +1518,7 @@ export class PostgresEngine implements BrainEngine {
     // subsume the scalar case). When neither is set, no filter applies.
     const sourceCondition = filters?.sourceIds && filters.sourceIds.length > 0
       ? sql`AND p.source_id = ANY(${filters.sourceIds}::text[])`
-      : filters?.sourceId
+      : filters?.sourceId !== undefined
         ? sql`AND p.source_id = ${filters.sourceId}`
         : sql``;
     const serializedFrontmatterFilters = filters?.frontmatterFilters?.length

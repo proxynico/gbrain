@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import type { PageInput } from '../../src/core/types.ts';
+import { PAGE_SORT_SQL, type PageInput } from '../../src/core/types.ts';
 import {
   getConn,
   getEngine,
@@ -43,6 +43,40 @@ async function putFixture(
 }
 
 describeIfDB('Postgres listPages exact enumeration', () => {
+  test('treats an explicit empty sourceId as a real filter that matches no rows', async () => {
+    await putFixture('pages/visible', {});
+
+    expect(await getEngine().listPages({ sourceId: '', sort: 'slug' })).toEqual([]);
+  });
+
+  test('slug pagination has deterministic tie-breakers across sources and rows', async () => {
+    expect(PAGE_SORT_SQL.slug).toBe('p.slug ASC, p.source_id ASC, p.id ASC');
+
+    await getEngine().executeRaw(
+      `INSERT INTO sources (id, name, config)
+       VALUES ($1, $2, $3::text::jsonb)`,
+      ['team-pagination', 'Team Pagination', JSON.stringify({ federated: false })],
+    );
+    await putFixture('pagination-tie/shared', {}, 'team-pagination');
+    await putFixture('pagination-tie/shared', {}, 'default');
+
+    const pages = await Promise.all([0, 1].map(async (offset) => {
+      const [page] = await getEngine().listPages({
+        sourceIds: ['default', 'team-pagination'],
+        slugPrefix: 'pagination-tie/',
+        sort: 'slug',
+        limit: 1,
+        offset,
+      });
+      return `${page.source_id}:${page.slug}`;
+    }));
+
+    expect(pages).toEqual([
+      'default:pagination-tie/shared',
+      'team-pagination:pagination-tie/shared',
+    ]);
+  });
+
   test('paginates all pages without duplicates or gaps', async () => {
     for (let index = 0; index < 125; index += 1) {
       const slug = `pages/page-${index.toString().padStart(3, '0')}`;
@@ -52,6 +86,7 @@ describeIfDB('Postgres listPages exact enumeration', () => {
     const batches = await Promise.all(
       [0, 40, 80, 120].map((offset) =>
         getEngine().listPages({
+          slugPrefix: 'pages/page-',
           limit: 40,
           offset,
           sort: 'slug',

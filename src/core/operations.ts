@@ -37,6 +37,13 @@ import { getContentFlag } from './quarantine.ts';
 import { unverifiedExtractionFragment, isUnverifiedExtraction, EXTRACTION_STATUS_KEY, STATUS_VERIFIED } from './extraction-review.ts';
 import { buildVisibilityClause } from './search/sql-ranking.ts';
 import { bumpLastRetrievedAt } from './last-retrieved.ts';
+import {
+  PageListFilterError,
+  parsePageFrontmatterFields,
+  parsePageFrontmatterFilters,
+  parsePageListOffset,
+  projectPageFrontmatter,
+} from './page-list-filters.ts';
 import { isSearchMode } from './search/mode.ts';
 import { stampEvidence } from './search/evidence.ts';
 import { packToBudget, estimateTokens, resultTokens } from './search/token-budget.ts';
@@ -1960,9 +1967,24 @@ const list_pages: Operation = {
     type: { type: 'string', description: 'Filter by page type' },
     tag: { type: 'string', description: 'Filter by tag' },
     limit: { type: 'number', description: 'Max results (default 50; remote callers are capped at 100)' },
+    source_id: { type: 'string', description: 'Narrow to one authorized source.' },
     offset: {
       type: 'number',
-      description: 'Skip first N rows (pagination). Engine-supported since PageFilters gained offset; previously accepted at the CLI and silently dropped.',
+      description: 'Skip N rows after filters and sort. Default 0.',
+    },
+    slug_prefix: {
+      type: 'string',
+      description: 'Literal slug prefix; %, _, and backslash are not wildcards.',
+    },
+    frontmatter_filters: {
+      type: 'array',
+      items: { type: 'object' },
+      description: 'Up to 8 AND clauses using eq_ci or contains_any_ci.',
+    },
+    frontmatter_fields: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Up to 16 top-level frontmatter fields to include in each row.',
     },
     // v0.29 — surface filter that already exists on PageFilters.
     updated_after: {
@@ -1977,6 +1999,33 @@ const list_pages: Operation = {
     include_deleted: { type: 'boolean', description: 'v0.26.5: include soft-deleted pages (default: false). Used by restore workflows and operator diagnostics.' },
   },
   handler: async (ctx, p) => {
+    let offset: number | undefined;
+    let frontmatterFilters: ReturnType<typeof parsePageFrontmatterFilters>;
+    let projectedFields: string[];
+    let sourceId: string | undefined;
+    let slugPrefix: string | undefined;
+    try {
+      offset = parsePageListOffset(p.offset);
+      frontmatterFilters = parsePageFrontmatterFilters(p.frontmatter_filters);
+      projectedFields = parsePageFrontmatterFields(p.frontmatter_fields);
+      if (p.source_id !== undefined) {
+        if (typeof p.source_id !== 'string' || p.source_id.trim().length === 0) {
+          throw new PageListFilterError('source_id must be a non-empty string');
+        }
+        sourceId = p.source_id;
+      }
+      if (p.slug_prefix !== undefined) {
+        if (typeof p.slug_prefix !== 'string') {
+          throw new PageListFilterError('slug_prefix must be a string');
+        }
+        slugPrefix = p.slug_prefix;
+      }
+    } catch (error: unknown) {
+      if (error instanceof PageListFilterError) {
+        throw new OperationError('invalid_params', error.message);
+      }
+      throw error;
+    }
     // Whitelist the sort enum at the handler before passing to the engine.
     // Engines also whitelist via PAGE_SORT_SQL but defending here keeps
     // unsupported strings from reaching the SQL layer.
@@ -1991,7 +2040,7 @@ const list_pages: Operation = {
     // pages indiscriminately.
     // #3242: federatedSearchScope so unqualified listing spans federated
     // sources (same visibility set as search / get_page). Grants still win.
-    const scope = federatedSearchScope(ctx);
+    const scope = federatedSearchScope(ctx, sourceId);
     // The 100-row cap exists to protect remote MCP/OAuth transports from
     // unbounded result dumps. Local CLI callers (ctx.remote === false — the
     // same trust boundary that already bypasses scope enforcement, see the
@@ -2010,13 +2059,6 @@ const list_pages: Operation = {
       // tab-separated and consumed by scripts, so it must stay clean.
       ctx.logger.warn(`[gbrain] Warning: list limit clamped from ${requestedLimit} to ${limit}; use offset to paginate`);
     }
-    // Thread offset through — PageFilters has supported it all along; the op
-    // layer just never passed it, so `--offset` was accepted and ignored.
-    const requestedOffset = p.offset as number | undefined;
-    const offset =
-      requestedOffset !== undefined && Number.isFinite(requestedOffset) && requestedOffset > 0
-        ? Math.floor(requestedOffset)
-        : undefined;
     // Probe one row past the effective limit so truncation is detectable
     // without a COUNT query. The bug class sealed here is SILENT truncation
     // — an exhaustive consumer (audit, scan, backfill) gets a full-looking
@@ -2028,6 +2070,8 @@ const list_pages: Operation = {
       tag: p.tag as string,
       limit: limit + 1,
       offset,
+      slugPrefix,
+      frontmatterFilters,
       includeDeleted: (p.include_deleted as boolean) === true,
       updated_after: typeof p.updated_after === 'string' ? p.updated_after : undefined,
       sort,
@@ -2057,6 +2101,9 @@ const list_pages: Operation = {
       title: pg.title,
       updated_at: pg.updated_at,
       ...(pg.deleted_at ? { deleted_at: pg.deleted_at } : {}),
+      ...(projectedFields.length > 0
+        ? { frontmatter: projectPageFrontmatter(pg.frontmatter, projectedFields) }
+        : {}),
     }));
   },
   scope: 'read',
