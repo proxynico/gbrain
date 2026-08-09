@@ -172,6 +172,53 @@ describe('hybridSearchCached — email metadata through vector-first fusion', ()
   });
 });
 
+describe('hybridSearch — retrieval arm failure', () => {
+  test('preserves vector results when the keyword arm rejects', async () => {
+    const originalSearchKeyword = engine.searchKeyword.bind(engine);
+    engine.searchKeyword = async () => {
+      throw new Error('keyword retrieval unavailable');
+    };
+
+    try {
+      const out = await hybridSearch(engine, 'vector first duplicate metadata evidence', {
+        limit: 10,
+        autocut: false,
+      });
+
+      expect(out.some((result) => result.slug === 'mail/vector-first')).toBe(true);
+    } finally {
+      engine.searchKeyword = originalSearchKeyword;
+    }
+  });
+
+  test('rejects with the first error when every retrieval arm rejects', async () => {
+    const originalSearchKeyword = engine.searchKeyword.bind(engine);
+    const originalSearchTitles = engine.searchTitles.bind(engine);
+    const originalSearchVector = engine.searchVector.bind(engine);
+    const firstError = new Error('keyword retrieval unavailable');
+    engine.searchKeyword = async () => {
+      throw firstError;
+    };
+    engine.searchTitles = async () => {
+      throw new Error('title retrieval unavailable');
+    };
+    engine.searchVector = async () => {
+      throw new Error('vector retrieval unavailable');
+    };
+
+    try {
+      await expect(hybridSearch(engine, 'vector first duplicate metadata evidence', {
+        limit: 10,
+        autocut: false,
+      })).rejects.toBe(firstError);
+    } finally {
+      engine.searchKeyword = originalSearchKeyword;
+      engine.searchTitles = originalSearchTitles;
+      engine.searchVector = originalSearchVector;
+    }
+  });
+});
+
 describe('hybridSearch — reranker enabled (reorder)', () => {
   test('rerankerFn receives a non-empty document list', async () => {
     let receivedDocs: string[] = [];

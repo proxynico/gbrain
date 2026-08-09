@@ -1166,6 +1166,33 @@ export async function hybridSearch(
     opts?.crossModal && opts.crossModal !== 'auto' ? opts.crossModal : undefined;
   const earlyModality = explicitModality ?? suggestions.suggestedModality ?? 'text';
   const explicitTypeFilter = hasExplicitTypeFilter(opts);
+  let attemptedRecallArms = 0;
+  let successfulRecallArms = 0;
+  let firstRecallError: unknown;
+  const runRecallArm = async (
+    warningKey: string,
+    warningPrefix: string,
+    operation: () => Promise<SearchResult[]>,
+  ): Promise<SearchResult[]> => {
+    attemptedRecallArms += 1;
+    try {
+      const results = await operation();
+      successfulRecallArms += 1;
+      return results;
+    } catch (err) {
+      firstRecallError ??= err;
+      warnOncePerProcess(
+        warningKey,
+        `${warningPrefix}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return [];
+    }
+  };
+  const throwIfTotalRecallOutage = (results: SearchResult[]): void => {
+    if (results.length === 0 && attemptedRecallArms > 0 && successfulRecallArms === 0) {
+      throw firstRecallError;
+    }
+  };
 
   // A preferred query can still be modality-ambiguous (for example, asking
   // what a meeting said about "the chart"). Resolve that narrow overlap before
@@ -1213,34 +1240,29 @@ export async function hybridSearch(
     earlyModality === 'image'
       ? [[], [], [], []]
       : await Promise.all([
-          engine.searchKeyword(query, searchOpts),
-          engine.searchTitles(query, searchOpts).catch((err: unknown) => {
-            warnOncePerProcess(
-              'search-titles-arm-failed',
-              `[gbrain] searchTitles arm failed (fail-open, title candidates skipped): ` +
-                `${err instanceof Error ? err.message : String(err)}`,
-            );
-            return [] as SearchResult[];
-          }),
+          runRecallArm(
+            'search-keyword-arm-failed',
+            '[gbrain] searchKeyword arm failed (fail-open, keyword candidates skipped)',
+            () => engine.searchKeyword(query, searchOpts),
+          ),
+          runRecallArm(
+            'search-titles-arm-failed',
+            '[gbrain] searchTitles arm failed (fail-open, title candidates skipped)',
+            () => engine.searchTitles(query, searchOpts),
+          ),
           preferredTypeSearchOpts
-            ? engine.searchKeyword(query, preferredTypeSearchOpts).catch((err: unknown) => {
-                warnOncePerProcess(
-                  'search-preferred-types-keyword-arm-failed',
-                  `[gbrain] preferred-types keyword arm failed (fail-open, typed candidates skipped): ` +
-                    `${err instanceof Error ? err.message : String(err)}`,
-                );
-                return [] as SearchResult[];
-              })
+            ? runRecallArm(
+                'search-preferred-types-keyword-arm-failed',
+                '[gbrain] preferred-types keyword arm failed (fail-open, typed candidates skipped)',
+                () => engine.searchKeyword(query, preferredTypeSearchOpts),
+              )
             : Promise.resolve([] as SearchResult[]),
           preferredTypeSearchOpts
-            ? engine.searchTitles(query, preferredTypeSearchOpts).catch((err: unknown) => {
-                warnOncePerProcess(
-                  'search-preferred-types-title-arm-failed',
-                  `[gbrain] preferred-types title arm failed (fail-open, typed title candidates skipped): ` +
-                    `${err instanceof Error ? err.message : String(err)}`,
-                );
-                return [] as SearchResult[];
-              })
+            ? runRecallArm(
+                'search-preferred-types-title-arm-failed',
+                '[gbrain] preferred-types title arm failed (fail-open, typed title candidates skipped)',
+                () => engine.searchTitles(query, preferredTypeSearchOpts),
+              )
             : Promise.resolve([] as SearchResult[]),
         ]);
 
@@ -1424,6 +1446,7 @@ export async function hybridSearch(
         ? { token_budget: noEmbedBudgetMeta }
         : {}),
     });
+    throwIfTotalRecallOutage(noEmbedBudgeted);
     return noEmbedBudgeted;
   }
 
@@ -1527,7 +1550,11 @@ export async function hybridSearch(
         ...searchOpts,
         embeddingColumn: 'embedding_multimodal',
       };
-      const unifiedList = await engine.searchVector(unifiedEmbedding, unifiedSearchOpts);
+      const unifiedList = await runRecallArm(
+        'search-vector-arm-failed',
+        '[gbrain] searchVector arm failed (fail-open, vector candidates skipped)',
+        () => engine.searchVector(unifiedEmbedding, unifiedSearchOpts),
+      );
       // D8 fail-open: zero rows + not strict-mode → fall through to dual-column.
       if (unifiedList.length === 0 && !resolvedMode.unified_multimodal_only) {
         console.error(
@@ -1567,7 +1594,11 @@ export async function hybridSearch(
         ...searchOpts,
         embeddingColumn: 'embedding_image',
       };
-      const imageList = await engine.searchVector(imageEmbedding, imageSearchOpts);
+      const imageList = await runRecallArm(
+        'search-vector-arm-failed',
+        '[gbrain] searchVector arm failed (fail-open, vector candidates skipped)',
+        () => engine.searchVector(imageEmbedding, imageSearchOpts),
+      );
       for (const r of imageList) {
         r.modality = r.modality ?? 'image';
       }
@@ -1719,15 +1750,11 @@ export async function hybridSearch(
     const typedVectorOpts: SearchOpts = unifiedDone
       ? { ...preferredTypeSearchOpts, embeddingColumn: 'embedding_multimodal' }
       : preferredTypeSearchOpts;
-    preferredTypeVectorResults = await engine.searchVector(queryEmbedding, typedVectorOpts)
-      .catch((err: unknown) => {
-        warnOncePerProcess(
-          'search-preferred-types-vector-arm-failed',
-          `[gbrain] preferred-types vector arm failed (fail-open, typed vector candidates skipped): ` +
-            `${err instanceof Error ? err.message : String(err)}`,
-        );
-        return [] as SearchResult[];
-      });
+    preferredTypeVectorResults = await runRecallArm(
+      'search-preferred-types-vector-arm-failed',
+      '[gbrain] preferred-types vector arm failed (fail-open, typed vector candidates skipped)',
+      () => engine.searchVector(queryEmbedding!, typedVectorOpts),
+    );
     preferredTypeList = fusePreferredTypeCandidates();
     preferredTypeWinners = selectPreferredTypeWinners(
       suggestions.preferredTypes ?? [],
@@ -1801,6 +1828,7 @@ export async function hybridSearch(
         ? { token_budget: kwBudgetMeta }
         : {}),
     });
+    throwIfTotalRecallOutage(kwBudgeted);
     return kwBudgeted;
   }
 
@@ -1949,6 +1977,7 @@ export async function hybridSearch(
     preferredTypeWinners,
     fused,
   );
+  throwIfTotalRecallOutage(coveredBeforeRerank);
 
   // Auto-escalate: if detail=low returned 0, retry with high. The inner
   // call's onMeta fires with the escalated detail_resolved; do NOT also
