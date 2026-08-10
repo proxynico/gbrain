@@ -30,21 +30,18 @@ beforeEach(async () => {
   process.env.GBRAIN_HOME = tmpHome;
   // Belt-and-suspenders: explicitly clear the jsonl at the resolved path.
   const { syncFailuresPath } = await import('../src/core/sync.ts');
-  try { rmSync(syncFailuresPath(), { force: true }); } catch { /* none */ }
+  const failurePath = syncFailuresPath();
+  expect(failurePath).toBe(join(tmpHome, '.gbrain', 'sync-failures.jsonl'));
+  try { rmSync(failurePath, { force: true }); } catch { /* none */ }
 });
 
 afterEach(() => {
-  if (originalGbrainHome) process.env.GBRAIN_HOME = originalGbrainHome;
+  if (originalGbrainHome !== undefined) process.env.GBRAIN_HOME = originalGbrainHome;
   else delete process.env.GBRAIN_HOME;
   try { rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
 describe('Bug 9 — sync-failures JSONL helpers', () => {
-  test('sync failure ledger stays in suite temp home', async () => {
-    const { syncFailuresPath } = await import('../src/core/sync.ts');
-    expect(syncFailuresPath()).toBe(join(tmpHome, '.gbrain', 'sync-failures.jsonl'));
-  });
-
   // issue #1939: recordSyncFailures now upserts by (source_id, path) and
   // increments `attempts` (consecutive failed runs) instead of appending a row
   // per (path, commit, error). One row per failing path; the attempt counter
