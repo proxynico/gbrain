@@ -21,25 +21,30 @@ import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync } from 'fs
 import { join } from 'path';
 import { tmpdir } from 'os';
 
-// Point HOME at a tmpdir so we don't stomp the real ~/.gbrain/sync-failures.jsonl
+// Point GBRAIN_HOME at a tmpdir so we don't stomp the real ledger.
 let tmpHome: string;
-const originalHome = process.env.HOME;
+const originalGbrainHome = process.env.GBRAIN_HOME;
 
 beforeEach(async () => {
   tmpHome = mkdtempSync(join(tmpdir(), 'gbrain-sync-failures-'));
-  process.env.HOME = tmpHome;
+  process.env.GBRAIN_HOME = tmpHome;
   // Belt-and-suspenders: explicitly clear the jsonl at the resolved path.
   const { syncFailuresPath } = await import('../src/core/sync.ts');
   try { rmSync(syncFailuresPath(), { force: true }); } catch { /* none */ }
 });
 
 afterEach(() => {
-  if (originalHome) process.env.HOME = originalHome;
-  else delete process.env.HOME;
+  if (originalGbrainHome) process.env.GBRAIN_HOME = originalGbrainHome;
+  else delete process.env.GBRAIN_HOME;
   try { rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
 describe('Bug 9 — sync-failures JSONL helpers', () => {
+  test('sync failure ledger stays in suite temp home', async () => {
+    const { syncFailuresPath } = await import('../src/core/sync.ts');
+    expect(syncFailuresPath()).toBe(join(tmpHome, '.gbrain', 'sync-failures.jsonl'));
+  });
+
   // issue #1939: recordSyncFailures now upserts by (source_id, path) and
   // increments `attempts` (consecutive failed runs) instead of appending a row
   // per (path, commit, error). One row per failing path; the attempt counter
