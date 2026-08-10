@@ -18,7 +18,7 @@ Any test that touches paths resolved through `configDir()`, `gbrainPath()`, or
 
 `test/sync-resumable-import.serial.test.ts` and `test/sync-failures.test.ts`
 set `GBRAIN_HOME` and assert the exact ledger path. A guarded run of the latter
-passes 61 tests without changing the live ledger hash.
+passes 60 tests without changing the live ledger hash.
 
 ## Related Lessons
 
