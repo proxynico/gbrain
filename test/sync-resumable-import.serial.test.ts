@@ -119,7 +119,7 @@ describe('#1794 — resumable incremental sync (pinned target)', () => {
 
   test('sync failure ledger stays in suite temp home', async () => {
     const { syncFailuresPath } = await import('../src/core/sync.ts');
-    expect(syncFailuresPath()).toStartWith(join(tmpdir(), 'gbrain-1794-home-'));
+    expect(syncFailuresPath()).toBe(join(suiteHome, '.gbrain', 'sync-failures.jsonl'));
   });
 
   // ── A. CRITICAL: resume skips checkpointed paths (the mechanism) ──────────
