@@ -36,6 +36,8 @@ import { computePoolBudgetCheck } from '../src/commands/doctor.ts';
 
 let engine: PGLiteEngine;
 let repoPath: string;
+let priorGbrainHome: string | undefined;
+let suiteHome: string;
 
 function gitInit(repo: string): void {
   execSync('git init', { cwd: repo, stdio: 'pipe' });
@@ -83,13 +85,23 @@ async function seedCheckpoint(lastCommit: string, target: string, paths: string[
 
 describe('#1794 — resumable incremental sync (pinned target)', () => {
   beforeAll(async () => {
+    priorGbrainHome = process.env.GBRAIN_HOME;
+    suiteHome = mkdtempSync(join(tmpdir(), 'gbrain-1794-home-'));
+    process.env.GBRAIN_HOME = suiteHome;
+
     engine = new PGLiteEngine();
     await engine.connect({});
     await engine.initSchema();
   }, 60_000);
 
   afterAll(async () => {
-    if (engine) await engine.disconnect();
+    try {
+      if (engine) await engine.disconnect();
+    } finally {
+      if (priorGbrainHome === undefined) delete process.env.GBRAIN_HOME;
+      else process.env.GBRAIN_HOME = priorGbrainHome;
+      if (suiteHome) rmSync(suiteHome, { recursive: true, force: true });
+    }
   }, 60_000);
 
   beforeEach(async () => {
@@ -103,6 +115,11 @@ describe('#1794 — resumable incremental sync (pinned target)', () => {
   afterEach(() => {
     delete process.env.GBRAIN_SYNC_CHECKPOINT_EVERY;
     if (repoPath) rmSync(repoPath, { recursive: true, force: true });
+  });
+
+  test('sync failure ledger stays in suite temp home', async () => {
+    const { syncFailuresPath } = await import('../src/core/sync.ts');
+    expect(syncFailuresPath()).toStartWith(join(tmpdir(), 'gbrain-1794-home-'));
   });
 
   // ── A. CRITICAL: resume skips checkpointed paths (the mechanism) ──────────
