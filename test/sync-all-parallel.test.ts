@@ -48,7 +48,13 @@ import {
   buildSyncStatusReport,
 } from '../src/commands/sync.ts';
 import { SYNC_LOCK_ID, syncLockId } from '../src/core/db-lock.ts';
-import { withSourcePrefix, slog } from '../src/core/console-prefix.ts';
+import {
+  _resetStdoutRedirectForTests,
+  isStdoutLoggingRedirected,
+  redirectStdoutLoggingToStderr,
+  withSourcePrefix,
+  slog,
+} from '../src/core/console-prefix.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 
 // ── resolveParallelism ──────────────────────────────────────────────
@@ -390,8 +396,10 @@ describe('per-source line prefix under withSourcePrefix', () => {
     // slog needs raw stream control to emit prefixed lines.
     const stdoutOrig = process.stdout.write.bind(process.stdout);
     const consoleLogOrig = console.log;
+    const wasStdoutRedirected = isStdoutLoggingRedirected();
     const stdoutChunks: string[] = [];
     const consoleLogChunks: unknown[][] = [];
+    _resetStdoutRedirectForTests();
     process.stdout.write = ((chunk: string | Uint8Array): boolean => {
       stdoutChunks.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf-8'));
       return true;
@@ -416,6 +424,8 @@ describe('per-source line prefix under withSourcePrefix', () => {
       process.stdout.write = stdoutOrig;
       // eslint-disable-next-line no-console
       console.log = consoleLogOrig;
+      if (wasStdoutRedirected) redirectStdoutLoggingToStderr();
+      else _resetStdoutRedirectForTests();
     }
   });
 });

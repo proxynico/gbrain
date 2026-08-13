@@ -37,6 +37,7 @@ import { computePoolBudgetCheck } from '../src/commands/doctor.ts';
 let engine: PGLiteEngine;
 let repoPath: string;
 let priorGbrainHome: string | undefined;
+let priorSyncFailuresDir: string | undefined;
 let suiteHome: string;
 
 function gitInit(repo: string): void {
@@ -86,8 +87,12 @@ async function seedCheckpoint(lastCommit: string, target: string, paths: string[
 describe('#1794 — resumable incremental sync (pinned target)', () => {
   beforeAll(async () => {
     priorGbrainHome = process.env.GBRAIN_HOME;
+    priorSyncFailuresDir = process.env.GBRAIN_SYNC_FAILURES_DIR;
     suiteHome = mkdtempSync(join(tmpdir(), 'gbrain-1794-home-'));
     process.env.GBRAIN_HOME = suiteHome;
+    // The full-suite preload protects the live ledger with this narrower
+    // override. This suite verifies GBRAIN_HOME resolution itself.
+    delete process.env.GBRAIN_SYNC_FAILURES_DIR;
 
     engine = new PGLiteEngine();
     await engine.connect({});
@@ -100,6 +105,8 @@ describe('#1794 — resumable incremental sync (pinned target)', () => {
     } finally {
       if (priorGbrainHome === undefined) delete process.env.GBRAIN_HOME;
       else process.env.GBRAIN_HOME = priorGbrainHome;
+      if (priorSyncFailuresDir === undefined) delete process.env.GBRAIN_SYNC_FAILURES_DIR;
+      else process.env.GBRAIN_SYNC_FAILURES_DIR = priorSyncFailuresDir;
       if (suiteHome) rmSync(suiteHome, { recursive: true, force: true });
     }
   }, 60_000);
