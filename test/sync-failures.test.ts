@@ -24,10 +24,15 @@ import { tmpdir } from 'os';
 // Point GBRAIN_HOME at a tmpdir so we don't stomp the real ledger.
 let tmpHome: string;
 const originalGbrainHome = process.env.GBRAIN_HOME;
+const originalSyncFailuresDir = process.env.GBRAIN_SYNC_FAILURES_DIR;
 
 beforeEach(async () => {
   tmpHome = mkdtempSync(join(tmpdir(), 'gbrain-sync-failures-'));
   process.env.GBRAIN_HOME = tmpHome;
+  // The suite-wide preload redirects incidental fixture failures away from the
+  // live ledger. This file tests GBRAIN_HOME resolution itself, so temporarily
+  // remove that narrower override.
+  delete process.env.GBRAIN_SYNC_FAILURES_DIR;
   // Belt-and-suspenders: explicitly clear the jsonl at the resolved path.
   const { syncFailuresPath } = await import('../src/core/sync.ts');
   const failurePath = syncFailuresPath();
@@ -38,6 +43,11 @@ beforeEach(async () => {
 afterEach(() => {
   if (originalGbrainHome !== undefined) process.env.GBRAIN_HOME = originalGbrainHome;
   else delete process.env.GBRAIN_HOME;
+  if (originalSyncFailuresDir !== undefined) {
+    process.env.GBRAIN_SYNC_FAILURES_DIR = originalSyncFailuresDir;
+  } else {
+    delete process.env.GBRAIN_SYNC_FAILURES_DIR;
+  }
   try { rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
