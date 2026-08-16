@@ -862,6 +862,7 @@ export interface KnobsHashContext {
    * as col=/prov=. Undefined falls back to 'medium' (the documented default).
    */
   detail?: 'low' | 'medium' | 'high';
+  /**
    * v=18: effective classifier preference for this query. Semantic cache
    * lookup is embedding-based, so adjacent query text can otherwise cross-hit
    * across different candidate-generation paths. Sorted in knobsHash so the

@@ -9,7 +9,6 @@ import type { BrainEngine } from './engine.ts';
 import { clampSearchLimit } from './engine.ts';
 import { resolveMarketSignalsConfig, type GBrainConfig } from './config.ts';
 import type { PageType } from './types.ts';
-import { hasScope } from './scope.ts';
 import { importFromContent } from './import-file.ts';
 import { writePageThrough, type WriteThroughResult } from './write-through.ts';
 import {
@@ -7316,6 +7315,9 @@ const request_tools: Operation = {
       total_tools: visible.length,
       note: 'Call request_tools {tools: ["name", ...]} for full schemas, or {surface: "starter"|"full"} to persist a wider tool surface (within the server ceiling), then re-issue tools/list.',
     };
+  },
+};
+
 const READ_MARKET_SIGNALS_DESCRIPTION =
   'Read human-reviewed market signals from exactly one granted derived source without model calls. ' +
   'Returns ready signals by default; use an explicit state only when a broader review state is needed.';
