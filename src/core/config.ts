@@ -22,6 +22,16 @@ export type DbUrlSource =
   | 'config-file-path' // PGLite: config file present, no URL but database_path set
   | null;
 
+export interface MarketSignalsConfig {
+  raw_source_id?: string;
+  derived_source_id?: string;
+}
+
+export interface ResolvedMarketSignalsConfig {
+  raw_source_id: string;
+  derived_source_id: string;
+}
+
 // Internal aliases retained for backwards compatibility with the existing call
 // sites below. They forward to the exported configDir()/configPath() so
 // GBRAIN_HOME is honored uniformly. Lazy: never call homedir() at module scope.
@@ -30,6 +40,8 @@ function getConfigPath() { return configPath(); }
 
 export interface GBrainConfig {
   engine: 'postgres' | 'pglite';
+  /** Manual market-rate capture source boundaries. */
+  market_signals?: MarketSignalsConfig;
   /** File-plane hook-lane keys (read by engine-free hook/push children).
    * `gbrain config set` routes these two dotted keys here, not to the DB. */
   push?: { allow_unverified_remote?: boolean };
@@ -557,6 +569,24 @@ export interface GBrainConfig {
      * over this file slot. Always bounded by the server ceiling (D2).
      */
     default_surface_dcr?: 'verbs' | 'starter' | 'full';
+  };
+}
+
+/** Resolves the separate raw-email and derived-rate sources for manual capture. */
+export function resolveMarketSignalsConfig(
+  config: GBrainConfig,
+): ResolvedMarketSignalsConfig {
+  const raw = config.market_signals;
+  const rawSourceId = raw?.raw_source_id?.trim() || 'default';
+  const derivedSourceId = raw?.derived_source_id?.trim() || 'lp-rate-intel';
+  if (rawSourceId === derivedSourceId) {
+    throw new Error(
+      'market_signals.raw_source_id and market_signals.derived_source_id must differ',
+    );
+  }
+  return {
+    raw_source_id: rawSourceId,
+    derived_source_id: derivedSourceId,
   };
 }
 

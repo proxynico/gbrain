@@ -110,6 +110,7 @@ import { skilloptOperations } from './ops/skillopt.ts';
 import { loopsOperations } from './ops/loops.ts';
 import { chronicleOperations } from './ops/chronicle.ts';
 import { extractionOperations } from './ops/extraction.ts';
+import { marketSignalsOperations } from './ops/market-signals.ts';
 import { entityIdentityOperations } from './ops/entity-identity.ts';
 import { requestToolsOperations } from './ops/request-tools.ts';
 
@@ -117,6 +118,7 @@ import { requestToolsOperations } from './ops/request-tools.ts';
 // verb (verbs.ts) loads it from THIS module at runtime — re-exported so every
 // existing importer of operations.ts is unchanged.
 export { parseTtlParam } from './ops/facts.ts';
+export { parseReadMarketRatesInput } from './ops/market-signals.ts';
 // The request_tools persist-limiter test seam moved with its cluster —
 // re-exported for the same reason.
 export { __resetRequestToolsPersistLimiterForTests } from './ops/request-tools.ts';
@@ -187,6 +189,8 @@ export const operations: Operation[] = [
   // Extraction quarantine lane (#160): gated entity extraction + review
   // queue — ops/extraction.ts
   ...extractionOperations,
+  // Explicitly kept market-rate rows: source-scoped read only.
+  ...marketSignalsOperations,
   // #4224: cross-source entity identity groups (v1 manual-only) —
   // ops/entity-identity.ts
   ...entityIdentityOperations,
@@ -299,6 +303,7 @@ const OP_AREAS: Record<string, string> = {
   find_contradictions: 'insights', find_experts: 'insights',
   find_trajectory: 'insights', get_calibration_profile: 'insights',
   volunteer_context: 'insights', get_recent_transcripts: 'insights',
+  read_market_signals: 'insights',
   // code intelligence
   code_callers: 'code', code_callees: 'code', code_def: 'code',
   code_refs: 'code', code_blast: 'code', code_flow: 'code',
