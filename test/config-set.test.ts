@@ -33,6 +33,12 @@ describe('KNOWN_CONFIG_KEYS', () => {
     expect(KNOWN_CONFIG_KEYS).toContain('search.cache.enabled');
   });
 
+  test('contains the market-signal source routing keys', () => {
+    expect(KNOWN_CONFIG_KEYS).toContain('market_signals');
+    expect(KNOWN_CONFIG_KEYS).toContain('market_signals.raw_source_id');
+    expect(KNOWN_CONFIG_KEYS).toContain('market_signals.derived_source_id');
+  });
+
   // Regression: `sources.default` is read by source-resolver.ts tier 5 on
   // every unqualified call and written by `gbrain sources default <id>`, yet
   // it was absent from this list — so `gbrain config set sources.default`

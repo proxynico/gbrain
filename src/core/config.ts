@@ -1544,6 +1544,10 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'link_resolution',
   'link_resolution.global_basename',
   'link_resolution.cross_source',
+  // Manual market-signal source routing.
+  'market_signals',
+  'market_signals.raw_source_id',
+  'market_signals.derived_source_id',
   // Spend controls (v0.42.42.0, issue #2139). Previously `--force`-only — the
   // operator had to discover these by reading source. Registered so `config
   // set` accepts them directly. See docs/operations/spend-controls.md.
