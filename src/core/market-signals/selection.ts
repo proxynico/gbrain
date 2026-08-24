@@ -44,7 +44,7 @@ export async function inspectMarketRates(
   const candidates = new Map<string, MarketRateCandidate>();
   for (const row of extractMarketRateRows(original)) {
     const evidence = buildEvidence(original, row.evidenceExcerpt);
-    const fingerprint = fingerprintMarketRate(row, evidence, input.sourceSlug);
+    const fingerprint = fingerprintMarketRate(row, evidence, rawPage.source_id, input.sourceSlug);
     const signalId = `market-rate-${fingerprint}` as const;
     if (candidates.has(signalId)) continue;
     candidates.set(signalId, {

@@ -18,7 +18,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { runExtract } from '../src/commands/extract.ts';
 import { setCliOptions } from '../src/core/cli-options.ts';
 import { loadOpCheckpoint, mentionsFingerprint } from '../src/core/op-checkpoint.ts';
-import { createHash } from 'crypto';
+import { buildGazetteer, hashMentionResolution } from '../src/core/by-mention.ts';
 
 let engine: PGLiteEngine;
 
@@ -85,13 +85,11 @@ async function expectedGazetteerHash(crossSourceEnabled = false): Promise<string
   // The gazetteer is built from entity pages by buildGazetteer; for tests
   // we just build it the same way the prod code does and hash sorted keys.
   // The default-off cross-source mode is part of the production fingerprint.
-  const { buildGazetteer } = await import('../src/core/by-mention.ts');
   const gz = await buildGazetteer(engine);
-  return createHash('sha256')
-    .update([...gz.keys()].sort().join('|'))
-    .update(crossSourceEnabled ? '|cross-source-on' : '|cross-source-off')
-    .digest('hex')
-    .slice(0, 8);
+  return hashMentionResolution(
+    gz,
+    crossSourceEnabled ? new Set(['default', 'team-b']) : undefined,
+  );
 }
 
 describe('by-mention checkpoint/resume (T5)', () => {
@@ -127,7 +125,7 @@ describe('by-mention checkpoint/resume (T5)', () => {
     const fp = mentionsFingerprint({ source: undefined, type: undefined, since: undefined, gazetteerHash: gh });
     await engine.executeRaw(
       `INSERT INTO op_checkpoints (op, fingerprint, completed_keys, updated_at)
-       VALUES ('extract-by-mention', $1, $2::jsonb, NOW())`,
+       VALUES ('extract-by-mention', $1, $2::text::jsonb, NOW())`,
       [fp, JSON.stringify(['default::writing/already-scanned'])],
     );
 
@@ -155,14 +153,12 @@ describe('by-mention checkpoint/resume (T5)', () => {
     await seedEntities();
     await seedContentPage('writing/post-1', 'Acme Corp.');
     await runByMention([]);
+    const oldHash = await expectedGazetteerHash();
 
     // Now add a new entity. The gazetteer hash changes → different
     // fingerprint → fresh checkpoint state (codex fix #3 regression guard).
     await engine.putPage('people/charlie', { type: 'person', title: 'Charlie Example', compiled_truth: 'body', timeline: '', frontmatter: {} });
 
-    const oldHash = createHash('sha256').update(
-      ['acme corp', 'alice example'].sort().join('|'),
-    ).update('|cross-source-off').digest('hex').slice(0, 8);
     const newHash = await expectedGazetteerHash();
     expect(newHash).not.toBe(oldHash);
 
@@ -231,7 +227,7 @@ describe('by-mention checkpoint/resume (T5)', () => {
     });
     await engine.executeRaw(
       `INSERT INTO op_checkpoints (op, fingerprint, completed_keys, updated_at)
-       VALUES ('extract-by-mention', $1, $2::jsonb, NOW())`,
+       VALUES ('extract-by-mention', $1, $2::text::jsonb, NOW())`,
       [offFingerprint, JSON.stringify(['team-b::writing/team-b-post'])],
     );
 

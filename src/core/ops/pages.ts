@@ -1281,7 +1281,12 @@ const list_pages: Operation = {
     },
     frontmatter_filters: {
       type: 'array',
-      items: { type: 'object' },
+      items: {
+        type: 'object',
+        description:
+          'Either {field, operator:"eq_ci", value} or ' +
+          '{field, operator:"contains_any_ci", values:[...]}.',
+      },
       description: 'Up to 8 AND clauses using eq_ci or contains_any_ci.',
     },
     frontmatter_fields: {
@@ -1424,7 +1429,10 @@ const list_pages: Operation = {
     }));
   },
   scope: 'read',
-  cliHints: { name: 'list' },
+  cliHints: {
+    name: 'list',
+    jsonParams: ['frontmatter_filters', 'frontmatter_fields'],
+  },
 };
 
 

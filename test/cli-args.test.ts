@@ -21,7 +21,7 @@ describe('parseOpArgs', () => {
     });
   });
 
-  test('array flags parse JSON while number parsing stays intact', () => {
+  test('explicit JSON flags parse containers while number parsing stays intact', () => {
     const params = parseOpArgs(operationsByName.list_pages, [
       '--offset', '100',
       '--frontmatter-filters', '[{"field":"subject","operator":"contains_any_ci","values":["rolling"]}]',
@@ -45,7 +45,10 @@ describe('parseOpArgs', () => {
         filters: { type: 'array' },
         metadata: { type: 'object' },
       },
-      cliHints: { positional: ['filters', 'metadata'] },
+      cliHints: {
+        positional: ['filters', 'metadata'],
+        jsonParams: ['filters', 'metadata'],
+      },
       handler: async () => null,
     };
 
@@ -71,6 +74,16 @@ describe('parseOpArgs', () => {
     expect(parseOpArgs(operationsByName.list_pages, [
       '--future-flag', '[not-json',
     ])).toEqual({ future_flag: '[not-json' });
+  });
+
+  test('existing string-array flags keep comma-separated CLI input', () => {
+    expect(parseOpArgs(operationsByName.query, [
+      'find customers',
+      '--types', 'person,company',
+    ])).toMatchObject({
+      query: 'find customers',
+      types: 'person,company',
+    });
   });
 });
 

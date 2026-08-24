@@ -1127,10 +1127,16 @@ export function resolveQueryImage(
 // the validator can never disagree on what a boolean flag swallows.
 const isBooleanLiteral = (tok: string | undefined): boolean => tok === 'true' || tok === 'false';
 
-/** Parses one typed CLI parameter from its raw token. */
-function parseCliParamValue(key: string, def: ParamDef | undefined, raw: string): unknown {
+/** Parses numbers and explicitly JSON-encoded CLI parameters from one raw token. */
+function parseCliParamValue(
+  op: Operation,
+  key: string,
+  def: ParamDef | undefined,
+  raw: string,
+): unknown {
   if (def?.type === 'number') return Number(raw);
   if (def?.type !== 'array' && def?.type !== 'object') return raw;
+  if (!op.cliHints?.jsonParams?.includes(key)) return raw;
 
   let parsed: unknown;
   try {
@@ -1176,7 +1182,7 @@ export function parseOpArgs(op: Operation, args: string[]): Record<string, unkno
         if (def) {
           const raw = arg.slice(eq + 1);
           params[key] = def.type === 'boolean' ? raw !== 'false'
-            : parseCliParamValue(key, def, raw);
+            : parseCliParamValue(op, key, def, raw);
           continue;
         }
       }
@@ -1216,7 +1222,7 @@ export function parseOpArgs(op: Operation, args: string[]): Record<string, unkno
         // positionally, then --content clobbered it). Warn to stderr; when
         // the discarded value names an existing file, point at capture --file.
         const prevValue = params[key];
-        params[key] = parseCliParamValue(key, paramDef, args[++i]);
+        params[key] = parseCliParamValue(op, key, paramDef, args[++i]);
         if (prevValue !== undefined && prevValue !== params[key]) {
           let fileHint = '';
           try {
@@ -1232,7 +1238,7 @@ export function parseOpArgs(op: Operation, args: string[]): Record<string, unkno
     } else if (posIdx < positional.length) {
       const key = positional[posIdx++];
       const paramDef = op.params[key];
-      params[key] = parseCliParamValue(key, paramDef, arg);
+      params[key] = parseCliParamValue(op, key, paramDef, arg);
     }
   }
 

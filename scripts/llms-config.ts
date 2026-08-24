@@ -124,6 +124,12 @@ export const SECTIONS: DocSection[] = [
         path: "docs/guides/live-sync.md",
       },
       {
+        title: "docs/guides/market-signal-intelligence.md",
+        description:
+          "Attended inspect, keep, and read commands for selected forwarded market-rate emails, with source isolation and explicit non-goals.",
+        path: "docs/guides/market-signal-intelligence.md",
+      },
+      {
         title: "docs/guides/cron-schedule.md",
         description: "Recurring job scheduling.",
         path: "docs/guides/cron-schedule.md",

@@ -899,7 +899,7 @@ export { DB_MERGED_PROVIDER_KEY_FIELDS } from './config-db-merge.ts';
  * file is the durable per-machine config; DB is the user-mutable runtime knob.
  *
  * Participating DB-plane keys: multimodal/OCR flags, provider_base_urls.*,
- * the embedding-column registry, content_sanity.*, dream.*, eval.*, and the
+ * the embedding-column registry, market_signals.*, content_sanity.*, dream.*, eval.*, and the
  * #2119-class read-side set (provider credentials, chat/expansion pins,
  * chat_fallback_chain, flat cycle.* — see src/core/config-db-merge.ts, which
  * also documents why embedding_model/dims must NEVER join any list, #4287).

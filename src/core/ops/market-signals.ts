@@ -4,7 +4,7 @@
  * the attended local CLI.
  */
 
-import { resolveMarketSignalsConfig } from '../config.ts';
+import { loadConfigWithEngine, resolveMarketSignalsConfig } from '../config.ts';
 import { BrainMarketSignalStore, type ReadMarketRatesInput } from '../market-signals/store.ts';
 import { ALL_SOURCES } from '../source-id.ts';
 import { OperationError, type Operation, type OperationContext } from './contract.ts';
@@ -80,9 +80,26 @@ function requireExpectedMarketSignalSource(
 function requireSingleMarketSignalReadSource(
   ctx: OperationContext,
   expectedSourceId: string,
+  requestedSourceId: unknown,
 ): string {
   const scope = sourceScopeOpts(ctx);
+  let requested: string | undefined;
+  if (requestedSourceId !== undefined) {
+    if (typeof requestedSourceId !== 'string' || requestedSourceId.trim() === '') {
+      throw new OperationError('invalid_params', 'source_id must be a non-empty string');
+    }
+    requested = requireExpectedMarketSignalSource(requestedSourceId.trim(), expectedSourceId);
+  }
   if (scope.sourceIds !== undefined) {
+    if (requested !== undefined) {
+      if (!scope.sourceIds.includes(requested)) {
+        throw new OperationError(
+          'permission_denied',
+          `Market rate source '${requested}' is outside the caller's granted sources.`,
+        );
+      }
+      return requested;
+    }
     if (scope.sourceIds.length !== 1) {
       throw new OperationError(
         'permission_denied',
@@ -90,6 +107,17 @@ function requireSingleMarketSignalReadSource(
       );
     }
     return requireExpectedMarketSignalSource(scope.sourceIds[0], expectedSourceId);
+  }
+  if (requested !== undefined) {
+    if (scope.sourceId !== undefined) {
+      requireExpectedMarketSignalSource(scope.sourceId, expectedSourceId);
+    } else if (ctx.remote !== false) {
+      throw new OperationError(
+        'permission_denied',
+        'Market rate rows require an explicit granted source.',
+      );
+    }
+    return requested;
   }
   return requireExpectedMarketSignalSource(scope.sourceId, expectedSourceId);
 }
@@ -102,17 +130,28 @@ const readMarketSignals: Operation = {
     'and provider filters.',
   scope: 'read',
   params: {
-    origin: { type: 'string', required: false },
-    destination: { type: 'string', required: false },
-    equipment: { type: 'string', required: false },
-    currency: { type: 'string', required: false },
-    carrier: { type: 'string', required: false },
-    provider: { type: 'string', required: false },
-    limit: { type: 'number', required: false },
+    origin: { type: 'string', required: false, description: 'Exact origin name.' },
+    destination: { type: 'string', required: false, description: 'Exact destination name.' },
+    equipment: { type: 'string', required: false, description: 'Exact equipment code.' },
+    currency: { type: 'string', required: false, description: 'Exact currency code.' },
+    carrier: { type: 'string', required: false, description: 'Exact carrier name.' },
+    provider: { type: 'string', required: false, description: 'Exact provider identity.' },
+    limit: { type: 'number', required: false, description: 'Maximum rows to return, from 1 to 100.' },
+    source_id: {
+      type: 'string',
+      required: false,
+      description: 'Select the configured derived source from a multi-source caller grant.',
+    },
   },
   handler: async (ctx, params) => {
-    const config = resolveMarketSignalsConfig(ctx.config);
-    const sourceId = requireSingleMarketSignalReadSource(ctx, config.derived_source_id);
+    const config = resolveMarketSignalsConfig(
+      await loadConfigWithEngine(ctx.engine, ctx.config) ?? ctx.config,
+    );
+    const sourceId = requireSingleMarketSignalReadSource(
+      ctx,
+      config.derived_source_id,
+      params.source_id,
+    );
     const store = new BrainMarketSignalStore(ctx.engine, {
       rawSourceId: config.raw_source_id,
       derivedSourceId: sourceId,

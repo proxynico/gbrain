@@ -35,6 +35,7 @@ async function seededEngine(
   compiledTruth: string,
   sender: string,
   effectiveDate: string | null,
+  sourceId = 'default',
 ): Promise<void> {
   await engine.putPage(slug, {
     type: 'email',
@@ -43,7 +44,7 @@ async function seededEngine(
     frontmatter: { from_address: sender },
     source_path: '/fixture/market-rate.eml',
     ...(effectiveDate === null ? {} : { effective_date: new Date(effectiveDate) }),
-  }, { sourceId: 'default' });
+  }, { sourceId });
 }
 
 describe('market-rate inspection', () => {
@@ -81,5 +82,27 @@ describe('market-rate inspection', () => {
 
     await expect(inspectMarketRates(engine, { sourceId: '', sourceSlug: SLUG, forwarder: FORWARDER }))
       .rejects.toThrow('Invalid source_id');
+  });
+
+  test('includes the raw source in the identity of otherwise identical rows', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config, created_at)
+       VALUES ($1, $1, NULL, '{}'::jsonb, NOW())`,
+      ['other'],
+    );
+    await seededEngine(SLUG, forwardedTable(), FORWARDER, null, 'default');
+    await seededEngine(SLUG, forwardedTable(), FORWARDER, null, 'other');
+
+    const [defaultRate] = await inspectMarketRates(engine, {
+      sourceId: 'default', sourceSlug: SLUG, forwarder: FORWARDER,
+    });
+    const [otherRate] = await inspectMarketRates(engine, {
+      sourceId: 'other', sourceSlug: SLUG, forwarder: FORWARDER,
+    });
+
+    expect(defaultRate!.rawSourceId).toBe('default');
+    expect(otherRate!.rawSourceId).toBe('other');
+    expect(otherRate!.fingerprint).not.toBe(defaultRate!.fingerprint);
+    expect(otherRate!.signalId).not.toBe(defaultRate!.signalId);
   });
 });

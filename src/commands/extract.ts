@@ -72,6 +72,7 @@ export type { WithRetryOpts } from '../core/retry.ts';
 import {
   buildGazetteer,
   findMentionedEntities,
+  hashMentionResolution,
   resolveMentionResolutionConfig,
 } from '../core/by-mention.ts';
 // #4611: the cross-source link fallback follows the configured
@@ -80,7 +81,6 @@ import { isValidSourceId } from '../core/source-id.ts';
 import {
   loadOpCheckpoint, recordCompleted, clearOpCheckpoint, mentionsFingerprint,
 } from '../core/op-checkpoint.ts';
-import { createHash } from 'crypto';
 // v0.41.15.0 (T7, D9): --workers N for the fs-walk inner loops via the
 // shared sliding-pool helper + PGLite-clamp wrapper.
 import { runSlidingPool } from '../core/worker-pool.ts';
@@ -1159,11 +1159,8 @@ export async function runExtract(engine: BrainEngine, args: string[]) {
           setCliExitVerdict(1);
         }
       } else if (byMention || ner) {
-        // v0.41.18.0 (T7): combined --by-mention + --ner walk shares one
-        // gazetteer; saves an entire pass on big brains. When only one
-        // flag is set, the other extractor skips silently.
-        const { buildGazetteer: buildGz } = await import('../core/by-mention.ts');
-        const sharedGazetteer = (byMention || ner) ? await buildGz(engine) : undefined;
+        // Each enabled extractor resolves the current mention policy before
+        // building its gazetteer so ignore and federation rules cannot drift.
         if (byMention) {
           const r = await extractMentionsFromDb(engine, dryRun, jsonMode, typeFilter, since, {
             sourceIdFilter,
@@ -1179,7 +1176,6 @@ export async function runExtract(engine: BrainEngine, args: string[]) {
             sourceIdFilter,
             typeFilter,
             since,
-            gazetteer: sharedGazetteer,
           });
           if (r.pack_unavailable && !jsonMode) {
             console.log('Note: no active schema pack with link_types[].inference.regex — NER pass produced 0 links.');
@@ -2258,13 +2254,13 @@ async function extractMentionsFromDb(
   // fingerprint so adding new entity pages mid-pause invalidates the
   // checkpoint cleanly. Without it, resumed pages would skip new
   // entities silently (codex flag).
-  const gazetteerHash = createHash('sha256')
-    .update([...gazetteer.keys()].sort().join('|'))
-    // Mode participates in the fingerprint so a mid-pause flag flip cannot
-    // resume pages scanned under the other source-isolation policy.
-    .update(mentionResolution.crossSourceFederated ? '|cross-source-on' : '|cross-source-off')
-    .digest('hex')
-    .slice(0, 8);
+  // Every target and the exact federation membership participate, so a
+  // mid-pause alias, title, ignore, source, or authorization change cannot
+  // reuse pages scanned under a stale resolution policy.
+  const gazetteerHash = hashMentionResolution(
+    gazetteer,
+    mentionResolution.crossSourceFederated,
+  );
 
   // #4304: --since prunes at the ref level BEFORE the checkpoint diff and
   // the per-page getPage loop. Refs outside the window never enter the

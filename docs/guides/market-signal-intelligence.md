@@ -11,8 +11,8 @@ before accepting selected IDs, so a caller cannot submit its own price, route,
 evidence, or hash. At the storage boundary, only selected rows are written to
 `lp-rate-intel` as ready market-rate data.
 
-`read` returns only those kept market-rate rows. Drift can use it without
-reading or parsing email.
+`read` returns only those kept market-rate rows. A downstream consumer can use
+it without reading or parsing email.
 
 ## Manual commands
 
@@ -32,5 +32,5 @@ Pass one or more returned `--row` IDs to `keep`. Stored pages live under
 This command does not poll mail, schedule work, sync a source, call a model, or
 run automatically. It provides no HTML preservation, sender discovery, or
 automatic scan. It does not register sources or create real market-rate data as
-part of this work. Drift implementation, deployment, and push are outside this
-guide.
+part of this work. Downstream implementation, deployment, and push are outside
+this guide.

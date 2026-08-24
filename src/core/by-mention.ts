@@ -26,6 +26,7 @@
  *            aliases, even when an entity page exists.
  */
 
+import { createHash } from 'crypto';
 import type { BrainEngine } from './engine.ts';
 import { isConfigTruthy } from './config.ts';
 import { isUndefinedTableError } from './utils.ts';
@@ -112,6 +113,34 @@ export interface FindMentionsOpts {
    * Undefined preserves the default same-source-only behavior.
    */
   crossSourceFederated?: ReadonlySet<string>;
+}
+
+interface GazetteerMatch {
+  entry: GazetteerEntry;
+  tokenCount: number;
+}
+
+/** Hashes every mention target and the exact cross-source authorization set. */
+export function hashMentionResolution(
+  gazetteer: Gazetteer,
+  crossSourceFederated: ReadonlySet<string> | undefined,
+): string {
+  const entries = [...gazetteer.values()]
+    .flatMap(bucket => bucket)
+    .map(entry => JSON.stringify([
+      entry.source_id,
+      entry.slug,
+      entry.title,
+      entry.tokens,
+    ]))
+    .sort();
+  const federatedSourceIds = crossSourceFederated === undefined
+    ? null
+    : [...crossSourceFederated].sort();
+  return createHash('sha256')
+    .update(JSON.stringify({ entries, federatedSourceIds }))
+    .digest('hex')
+    .slice(0, 8);
 }
 
 // ============================================================
@@ -511,21 +540,56 @@ export async function buildGazetteer(
 // Body-text scanner (pure)
 // ============================================================
 
+/** Selects one authorized, unambiguous maximal match at a body-token offset. */
+function selectGazetteerMatch(
+  tokens: ScannedToken[],
+  index: number,
+  bucket: GazetteerEntry[],
+  opts: FindMentionsOpts,
+): GazetteerMatch | undefined {
+  const authorizedMatches = bucket.filter((entry) => {
+    if (entry.source_id !== opts.fromSourceId) {
+      const federated = opts.crossSourceFederated;
+      if (!federated?.has(opts.fromSourceId) || !federated.has(entry.source_id)) {
+        return false;
+      }
+    }
+    if (index + entry.tokens.length > tokens.length) return false;
+    return entry.tokens.every((token, offset) => tokens[index + offset]!.text === token);
+  });
+  if (authorizedMatches.length === 0) return undefined;
+
+  const tokenCount = Math.max(...authorizedMatches.map(entry => entry.tokens.length));
+  const identities = new Map<string, GazetteerEntry>();
+  for (const entry of authorizedMatches) {
+    if (entry.tokens.length !== tokenCount) continue;
+    identities.set(`${entry.source_id}\0${entry.slug}`, entry);
+  }
+
+  const local = [...identities.values()].filter(entry => entry.source_id === opts.fromSourceId);
+  if (local.length === 1) return { entry: local[0]!, tokenCount };
+  if (local.length > 1) return undefined;
+
+  const foreign = [...identities.values()];
+  return foreign.length === 1 ? { entry: foreign[0]!, tokenCount } : undefined;
+}
+
 /**
  * Scan body text for mentions of gazetteer entities. Pure function — no
  * IO. Returns `Mention[]` ordered by offset, deduped per
- * `(fromSlug → entry.slug)` pair (first-mention-only cap).
+ * `(fromSourceId, fromSlug → entry.source_id, entry.slug)` pair
+ * (first-mention-only cap).
  *
  * Matcher is maximal-munch: at each token offset, the longest gazetteer
  * entry that matches the body-token sequence wins. Single-word entries
  * are length-1 maximal matches.
  *
  * Guards (deterministic):
- *  - D13 self-link: skip when `fromSlug === entry.slug`.
+ *  - D13 self-link: skip when both source id and slug match the source page.
  *  - Cross-source: skip when `fromSourceId !== entry.source_id`, unless both
  *    ids are present in the caller's explicitly federated source set.
- *  - First-mention-only cap: dedup by `entry.slug` (one link per
- *    target page regardless of how many body mentions there are).
+ *  - First-mention-only cap: dedup by `(entry.source_id, entry.slug)`
+ *    (one link per target page regardless of how many body mentions there are).
  *
  * Code-block stripping via `stripCodeBlocks` (preserves offsets, so the
  * returned mention offsets index into the ORIGINAL text not the stripped
@@ -542,7 +606,7 @@ export function findMentionedEntities(
   if (tokens.length === 0) return [];
 
   const out: Mention[] = [];
-  const seenSlugs = new Set<string>();
+  const seenTargets = new Set<string>();
   let i = 0;
 
   while (i < tokens.length) {
@@ -553,50 +617,20 @@ export function findMentionedEntities(
       continue;
     }
 
-    // Maximal-munch: bucket is pre-sorted longest-first. Find the first
-    // entry whose subsequent tokens all match the body sequence.
-    let matched: GazetteerEntry | null = null;
-    let matchedTokens = 0;
-    for (const entry of bucket) {
-      if (entry.tokens.length === 1) {
-        matched = entry;
-        matchedTokens = 1;
-        break;
-      }
-      // Multi-word: validate subsequent tokens.
-      if (i + entry.tokens.length > tokens.length) continue;
-      let allMatch = true;
-      for (let k = 1; k < entry.tokens.length; k++) {
-        if (tokens[i + k]!.text !== entry.tokens[k]) {
-          allMatch = false;
-          break;
-        }
-      }
-      if (allMatch) {
-        matched = entry;
-        matchedTokens = entry.tokens.length;
-        break;
-      }
-    }
-
-    if (!matched) {
+    const match = selectGazetteerMatch(tokens, i, bucket, opts);
+    if (match === undefined) {
       i++;
       continue;
     }
+    const { entry: matched, tokenCount: matchedTokens } = match;
 
     // Guards.
-    if (matched.slug === opts.fromSlug) {
+    if (matched.source_id === opts.fromSourceId && matched.slug === opts.fromSlug) {
       i += matchedTokens;
       continue;
     }
-    if (matched.source_id !== opts.fromSourceId) {
-      const federated = opts.crossSourceFederated;
-      if (!federated?.has(opts.fromSourceId) || !federated.has(matched.source_id)) {
-        i += matchedTokens;
-        continue;
-      }
-    }
-    if (seenSlugs.has(matched.slug)) {
+    const targetIdentity = `${matched.source_id}\0${matched.slug}`;
+    if (seenTargets.has(targetIdentity)) {
       i += matchedTokens;
       continue;
     }
@@ -607,7 +641,7 @@ export function findMentionedEntities(
       name: matched.title,
       offset: head.offset,
     });
-    seenSlugs.add(matched.slug);
+    seenTargets.add(targetIdentity);
     i += matchedTokens;
   }
 

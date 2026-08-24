@@ -107,6 +107,7 @@ import * as salienceImpl from './postgres-engine/salience.ts';
 import type { PgSalienceDeps } from './postgres-engine/salience.ts';
 import { hasCJK } from './cjk.ts';
 import { searchKeywordCJK as searchKeywordCJKImpl } from './postgres-engine/cjk-search.ts';
+import { buildFrontmatterListPagePredicate } from './postgres-engine/page-list.ts';
 import type { CjkKeywordCtx } from './search/cjk-keyword-sql.ts';
 
 function escapeSqlStringLiteral(value: string): string {
@@ -1054,27 +1055,10 @@ export class PostgresEngine implements BrainEngine {
       : filters?.sourceId !== undefined
         ? sql`AND p.source_id = ${filters.sourceId}`
         : sql``;
-    const serializedFrontmatterFilters = filters?.frontmatterFilters?.length
-      ? JSON.stringify(filters.frontmatterFilters)
-      : null;
-    const frontmatterCondition = serializedFrontmatterFilters
-      ? sql`AND NOT EXISTS (
-          SELECT 1
-          FROM jsonb_array_elements(${serializedFrontmatterFilters}::text::jsonb) AS fm_clause(value)
-          WHERE
-            jsonb_typeof(p.frontmatter -> (fm_clause.value ->> 'field')) IS DISTINCT FROM 'string'
-            OR CASE fm_clause.value ->> 'operator'
-              WHEN 'eq_ci' THEN
-                lower(p.frontmatter ->> (fm_clause.value ->> 'field')) <> lower(fm_clause.value ->> 'value')
-              WHEN 'contains_any_ci' THEN NOT EXISTS (
-                SELECT 1
-                FROM jsonb_array_elements_text(fm_clause.value -> 'values') AS needle(value)
-                WHERE strpos(lower(p.frontmatter ->> (fm_clause.value ->> 'field')), lower(needle.value)) > 0
-              )
-              ELSE TRUE
-            END
-        )`
-      : sql``;
+    const frontmatterCondition = buildFrontmatterListPagePredicate(
+      sql,
+      filters?.frontmatterFilters,
+    );
     // v0.26.5: hide soft-deleted by default; opt in via filters.includeDeleted.
     const deletedCondition = filters?.includeDeleted === true
       ? sql``

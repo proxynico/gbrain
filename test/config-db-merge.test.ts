@@ -150,6 +150,26 @@ describe('applyDbPlaneReadSideMerge — batched read (D2)', () => {
     expect(merged.chat_model).toBe('file-winner-model');
     expect(merged.cycle?.['auto_think.enabled']).toBe('true');
   });
+
+  test('market-signal routing shares the batch and preserves file precedence', async () => {
+    const { engine, counts } = makeBatchEngine({
+      'market_signals.raw_source_id': 'db-raw',
+      'market_signals.derived_source_id': 'db-derived',
+    });
+    const merged: GBrainConfig = {
+      engine: 'pglite',
+      market_signals: { raw_source_id: 'file-raw' },
+    };
+
+    await applyDbPlaneReadSideMerge(merged, engine);
+
+    expect(counts.executeRaw).toBe(1);
+    expect(counts.getConfig).toBe(0);
+    expect(merged.market_signals).toEqual({
+      raw_source_id: 'file-raw',
+      derived_source_id: 'db-derived',
+    });
+  });
 });
 
 describe('applyDbPlaneReadSideMerge — ~30s memo per engine handle (D2)', () => {

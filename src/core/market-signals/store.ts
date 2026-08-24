@@ -277,7 +277,11 @@ export class BrainMarketSignalStore {
         const existing = await tx.getPage(slug, { sourceId: this.options.derivedSourceId });
         if (existing !== null) {
           const prior = parseStoredRate(existing);
-          if (prior.sourceSlug !== rate.sourceSlug || prior.fingerprint !== rate.fingerprint) {
+          if (
+            prior.rawSourceId !== rate.rawSourceId
+            || prior.sourceSlug !== rate.sourceSlug
+            || prior.fingerprint !== rate.fingerprint
+          ) {
             throw integrityError(`signalId collision for ${rate.signalId}`);
           }
         }

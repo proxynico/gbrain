@@ -3,7 +3,7 @@
  *
  * DB-plane values that `gbrain config set` accepted for years, `config get`
  * echoed back, and NOTHING read: provider credentials, chat/expansion model
- * pins, the chat fallback chain, and flat `cycle.*` knobs. This module owns
+ * pins, the chat fallback chain, market-signal routing, and flat `cycle.*` knobs. This module owns
  * their sparse-merge into the loaded config — called by
  * `loadConfigWithEngine()` (src/core/config.ts) after its per-key merges,
  * with the same precedence: env > file > DB.
@@ -71,6 +71,8 @@ const DB_MERGED_SCALAR_KEYS: readonly string[] = [
   'expansion_model',
   'chat_model',
   'chat_fallback_chain',
+  'market_signals.raw_source_id',
+  'market_signals.derived_source_id',
 ];
 
 const CYCLE_PREFIX = 'cycle.';
@@ -204,6 +206,17 @@ export async function applyDbPlaneReadSideMerge(
         merged.chat_fallback_chain = chain;
       }
     }
+  }
+
+  const marketSignals = { ...(merged.market_signals ?? {}) };
+  if (marketSignals.raw_source_id === undefined) {
+    marketSignals.raw_source_id = values.get('market_signals.raw_source_id');
+  }
+  if (marketSignals.derived_source_id === undefined) {
+    marketSignals.derived_source_id = values.get('market_signals.derived_source_id');
+  }
+  if (Object.values(marketSignals).some(value => value !== undefined)) {
+    merged.market_signals = marketSignals;
   }
 
   // Flat cycle.* merge (#2137/#4297 read-side), fed by the same batched read

@@ -97,6 +97,21 @@ describe('loadConfigWithEngine (Phase 4 / F3)', () => {
     expect(merged?.embedding_image_ocr).toBe(true);
   });
 
+  test('market-signal DB routing fills missing leaves without overriding file values', async () => {
+    const merged = await loadConfigWithEngine(makeEngine({
+      'market_signals.raw_source_id': 'db-raw',
+      'market_signals.derived_source_id': 'db-derived',
+    }), {
+      engine: 'pglite',
+      market_signals: { raw_source_id: 'file-raw' },
+    });
+
+    expect(merged?.market_signals).toEqual({
+      raw_source_id: 'file-raw',
+      derived_source_id: 'db-derived',
+    });
+  });
+
   test('DB provider_base_urls.<provider> fills the gateway base URL map', async () => {
     const base: GBrainConfig = { engine: 'pglite' };
     const engine = makeEngine({

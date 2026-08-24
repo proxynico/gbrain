@@ -33,6 +33,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import {
   buildGazetteer,
   findMentionedEntities,
+  hashMentionResolution,
   resolveMentionResolutionConfig,
   tokenizeForScan,
   tokenizeTitle,
@@ -294,6 +295,94 @@ describe('findMentionedEntities — pure cases', () => {
       crossSourceFederated: new Set(['team-a']),
     });
     expect(mentions).toHaveLength(1);
+  });
+
+  test('17f. source-qualified identity links duplicate slugs in federated sources', () => {
+    const g = gazetteerFromEntries([
+      { slug: 'entities/shared', source_id: 'team-b', title: 'Beta Entity' },
+      { slug: 'entities/shared', source_id: 'team-c', title: 'Gamma Entity' },
+    ]);
+    const mentions = findMentionedEntities('Beta Entity met Gamma Entity.', g, {
+      fromSlug: 'entities/shared',
+      fromSourceId: 'team-a',
+      crossSourceFederated: new Set(['team-a', 'team-b', 'team-c']),
+    });
+
+    expect(mentions.map(({ source_id, slug }) => [source_id, slug])).toEqual([
+      ['team-b', 'entities/shared'],
+      ['team-c', 'entities/shared'],
+    ]);
+  });
+
+  test('17g. same-source identity wins over a federated namesake regardless of bucket order', () => {
+    for (const entries of [
+      [
+        { slug: 'companies/acme-foreign', source_id: 'team-b', title: 'Acme' },
+        { slug: 'companies/acme-local', source_id: 'team-a', title: 'Acme' },
+      ],
+      [
+        { slug: 'companies/acme-local', source_id: 'team-a', title: 'Acme' },
+        { slug: 'companies/acme-foreign', source_id: 'team-b', title: 'Acme' },
+      ],
+    ]) {
+      const mentions = findMentionedEntities('We met Acme today.', gazetteerFromEntries(entries), {
+        fromSlug: 'writing/post-1',
+        fromSourceId: 'team-a',
+        crossSourceFederated: new Set(['team-a', 'team-b']),
+      });
+      expect(mentions.map(({ source_id, slug }) => [source_id, slug])).toEqual([
+        ['team-a', 'companies/acme-local'],
+      ]);
+    }
+  });
+
+  test('17h. ambiguous local or federated namesakes do not depend on bucket order', () => {
+    for (const entries of [
+      [
+        { slug: 'companies/acme-local-a', source_id: 'team-a', title: 'Acme' },
+        { slug: 'companies/acme-local-b', source_id: 'team-a', title: 'Acme' },
+      ],
+      [
+        { slug: 'companies/acme-b', source_id: 'team-b', title: 'Acme' },
+        { slug: 'companies/acme-c', source_id: 'team-c', title: 'Acme' },
+      ],
+    ]) {
+      const mentions = findMentionedEntities('We met Acme today.', gazetteerFromEntries(entries), {
+        fromSlug: 'writing/post-1',
+        fromSourceId: 'team-a',
+        crossSourceFederated: new Set(['team-a', 'team-b', 'team-c']),
+      });
+      expect(mentions).toEqual([]);
+    }
+  });
+
+  test('17i. a local self-mention does not spill to a federated namesake', () => {
+    const mentions = findMentionedEntities('Acme announced results.', gazetteerFromEntries([
+      { slug: 'companies/acme-foreign', source_id: 'team-b', title: 'Acme' },
+      { slug: 'companies/acme-local', source_id: 'team-a', title: 'Acme' },
+    ]), {
+      fromSlug: 'companies/acme-local',
+      fromSourceId: 'team-a',
+      crossSourceFederated: new Set(['team-a', 'team-b']),
+    });
+
+    expect(mentions).toEqual([]);
+  });
+
+  test('17j. resolution hash includes same-bucket targets and federation membership', () => {
+    const base = gazetteerFromEntries([
+      { slug: 'companies/acme', source_id: 'team-a', title: 'Acme' },
+    ]);
+    const aliasChanged = gazetteerFromEntries([
+      { slug: 'companies/acme', source_id: 'team-a', title: 'Acme' },
+      { slug: 'companies/acme', source_id: 'team-a', title: 'Acme Labs' },
+    ]);
+
+    const original = hashMentionResolution(base, new Set(['team-a', 'team-b']));
+    expect(hashMentionResolution(aliasChanged, new Set(['team-a', 'team-b'])))
+      .not.toBe(original);
+    expect(hashMentionResolution(base, new Set(['team-a', 'team-c'])))
+      .not.toBe(original);
   });
 
   test('20. code-block + token interaction — body text outside block linked, inside skipped', () => {

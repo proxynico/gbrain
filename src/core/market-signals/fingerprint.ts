@@ -5,9 +5,11 @@ import type { ExtractedMarketRateRow, MarketSignalEvidence } from './types.ts';
 export function fingerprintMarketRate(
   row: ExtractedMarketRateRow,
   evidence: MarketSignalEvidence,
+  rawSourceId: string,
   sourceSlug: string,
 ): string {
   const canonical = {
+    rawSourceId,
     sourceSlug,
     originalSha256: evidence.sha256,
     excerpt: evidence.excerpt,

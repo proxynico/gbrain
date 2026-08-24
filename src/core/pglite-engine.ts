@@ -120,6 +120,7 @@ import type { PgliteCodeEdgesDeps } from './pglite-engine/code-edges.ts';
 import * as salienceImpl from './pglite-engine/salience.ts';
 import type { PgliteSalienceDeps } from './pglite-engine/salience.ts';
 import { searchKeywordCJK } from './pglite-engine/cjk-search.ts';
+import { appendFrontmatterListPagePredicate } from './pglite-engine/page-list.ts';
 
 /**
  * #4284 — opt-in out-of-band watchdog for a PGLite disconnect with a live
@@ -2064,26 +2065,7 @@ export class PGLiteEngine implements BrainEngine {
       params.push(filters.sourceId);
       where.push(`p.source_id = $${params.length}`);
     }
-    if (filters?.frontmatterFilters?.length) {
-      params.push(JSON.stringify(filters.frontmatterFilters));
-      const index = params.length;
-      where.push(`NOT EXISTS (
-        SELECT 1
-        FROM jsonb_array_elements($${index}::text::jsonb) AS fm_clause(value)
-        WHERE
-          jsonb_typeof(p.frontmatter -> (fm_clause.value ->> 'field')) IS DISTINCT FROM 'string'
-          OR CASE fm_clause.value ->> 'operator'
-            WHEN 'eq_ci' THEN
-              lower(p.frontmatter ->> (fm_clause.value ->> 'field')) <> lower(fm_clause.value ->> 'value')
-            WHEN 'contains_any_ci' THEN NOT EXISTS (
-              SELECT 1
-              FROM jsonb_array_elements_text(fm_clause.value -> 'values') AS needle(value)
-              WHERE strpos(lower(p.frontmatter ->> (fm_clause.value ->> 'field')), lower(needle.value)) > 0
-            )
-            ELSE TRUE
-          END
-      )`);
-    }
+    appendFrontmatterListPagePredicate(filters?.frontmatterFilters, params, where);
     // v0.26.5: hide soft-deleted by default; opt in via filters.includeDeleted.
     if (filters?.includeDeleted !== true) {
       where.push('p.deleted_at IS NULL');

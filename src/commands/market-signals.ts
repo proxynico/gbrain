@@ -1,6 +1,7 @@
 import type { BrainEngine } from '../core/engine.ts';
 import {
   loadConfig,
+  loadConfigWithEngine,
   resolveMarketSignalsConfig,
   type GBrainConfig,
 } from '../core/config.ts';
@@ -258,7 +259,9 @@ export async function runMarketSignals(
 
   const parsed = parseMarketSignalsArgs(args);
   const config = resolveMarketSignalsConfig(
-    deps.config ?? loadConfig() ?? ({ engine: 'pglite' } satisfies GBrainConfig),
+    deps.config
+      ?? await loadConfigWithEngine(engine, loadConfig())
+      ?? ({ engine: 'pglite' } satisfies GBrainConfig),
   );
   const write = deps.write ?? (line => process.stdout.write(line));
 
