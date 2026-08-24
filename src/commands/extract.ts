@@ -69,7 +69,11 @@ import { pathToSlug, slugifyPath, pruneDir, isSyncable } from '../core/sync.ts';
 import { withRetry, isRetryableConnError } from '../core/retry.ts';
 export { withRetry };
 export type { WithRetryOpts } from '../core/retry.ts';
-import { buildGazetteer, findMentionedEntities } from '../core/by-mention.ts';
+import {
+  buildGazetteer,
+  findMentionedEntities,
+  resolveMentionResolutionConfig,
+} from '../core/by-mention.ts';
 // #4611: the cross-source link fallback follows the configured
 // `sources.default` (validated shape) instead of the literal 'default'.
 import { isValidSourceId } from '../core/source-id.ts';
@@ -2216,10 +2220,9 @@ export async function extractStaleFromDB(
  * mention link_source is filtered OUT of backlink-count per D12 so
  * search ranking semantics are preserved.
  *
- * Source isolation: mentions cross-source pages are deliberately
- * suppressed by `findMentionedEntities`'s cross-source guard. Page in
- * source A mentions entity in source B → no link created. v1
- * conservative posture; relaxable in a future wave.
+ * Source isolation defaults to same-source only. When
+ * `link_resolution.cross_source_mentions` is enabled, cross-source links are
+ * allowed only when both source ids are active and explicitly federated.
  */
 async function extractMentionsFromDb(
   engine: BrainEngine,
@@ -2235,9 +2238,13 @@ async function extractMentionsFromDb(
   // the current mention set. Dry-run stays a pure preview (no deletes).
   const rebuild = opts?.rebuild === true && !dryRun;
 
-  // Build gazetteer once per run. Skip everything if there are no
-  // linkable entities — vacuous truth, no mentions to find.
-  const gazetteer = await buildGazetteer(engine);
+  // Resolve mention settings and build the gazetteer once per run. Skip
+  // everything if there are no linkable entities — vacuous truth, no mentions
+  // to find.
+  const mentionResolution = await resolveMentionResolutionConfig(engine);
+  const gazetteer = await buildGazetteer(engine, {
+    extraIgnore: mentionResolution.mentionIgnore,
+  });
   if (gazetteer.size === 0) {
     if (jsonMode) {
       process.stdout.write(JSON.stringify({ event: 'no_gazetteer', message: 'no linkable entity pages found; nothing to scan' }) + '\n');
@@ -2253,6 +2260,9 @@ async function extractMentionsFromDb(
   // entities silently (codex flag).
   const gazetteerHash = createHash('sha256')
     .update([...gazetteer.keys()].sort().join('|'))
+    // Mode participates in the fingerprint so a mid-pause flag flip cannot
+    // resume pages scanned under the other source-isolation policy.
+    .update(mentionResolution.crossSourceFederated ? '|cross-source-on' : '|cross-source-off')
     .digest('hex')
     .slice(0, 8);
 
@@ -2370,6 +2380,7 @@ async function extractMentionsFromDb(
       ? findMentionedEntities(body, gazetteer, {
           fromSlug: slug,
           fromSourceId: source_id,
+          crossSourceFederated: mentionResolution.crossSourceFederated,
         })
       : [];
 

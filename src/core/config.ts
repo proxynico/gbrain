@@ -1544,6 +1544,8 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'link_resolution',
   'link_resolution.global_basename',
   'link_resolution.cross_source',
+  'link_resolution.cross_source_mentions',
+  'link_resolution.mention_ignore',
   // Manual market-signal source routing.
   'market_signals',
   'market_signals.raw_source_id',
