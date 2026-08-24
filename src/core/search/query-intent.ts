@@ -43,6 +43,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import type { PageType } from '../types.ts';
 
 export type QueryIntent = 'entity' | 'temporal' | 'event' | 'concept' | 'general';
 
@@ -73,6 +74,8 @@ export interface QuerySuggestions {
   suggestedRecency: RecencyMode;
   /** v0.36 — cross-modal routing axis. Defaults to 'text' when nothing matches. */
   suggestedModality: ModalityMode;
+  /** Narrow page-type preferences that add recall without filtering ordinary arms. */
+  preferredTypes?: PageType[];
 }
 
 // ─────────────────────────────────────────────────────────
@@ -198,6 +201,21 @@ const SALIENCE_ON_PATTERNS = [
   /\b(update|status|progress)\s+(on|with|from)\b/i,
   /\bwhat\s+matters\b/i,
   /\bwhat'?s\s+important\b/i,
+];
+
+// Preferred-type hints stay conjunctive so generic temporal or meeting
+// language does not change candidate generation.
+const MARKET_WEEK_PATTERNS = [
+  /\blast\s+week\b/i,
+  /\bthis\s+week\b/i,
+];
+
+const QUOTE_RECALL_PATTERNS = [
+  /\bactually\s+said\b/i,
+  /\bexactly\s+said\b/i,
+  /\bverbatim\b/i,
+  /\bexact\s+words\b/i,
+  /\btranscript\b/i,
 ];
 
 // v0.36 cross-modal wave — modality-axis patterns (D6).
@@ -523,6 +541,13 @@ export function classifyQuery(
   const hasRecencyOn = matchesBank('recency_on', RECENCY_ON_PATTERNS, query, ext);
   const hasSalienceOn = matchesBank('salience_on', SALIENCE_ON_PATTERNS, query, ext);
 
+  let preferredTypes: PageType[] | undefined;
+  if (/\bmarket\b/i.test(query) && matches(MARKET_WEEK_PATTERNS, query)) {
+    preferredTypes = ['market-weekly'];
+  } else if (/\b(meeting|call)\b/i.test(query) && matches(QUOTE_RECALL_PATTERNS, query)) {
+    preferredTypes = ['meeting', 'transcript'];
+  }
+
   // Recency axis
   let suggestedRecency: RecencyMode;
   if (hasCanonical && !hasTemporalBound) {
@@ -551,7 +576,14 @@ export function classifyQuery(
   // can also produce 'both' via tie-break).
   const suggestedModality: ModalityMode = matches(CROSS_MODAL_PATTERNS, query) ? 'image' : 'text';
 
-  return { intent, suggestedDetail, suggestedSalience, suggestedRecency, suggestedModality };
+  return {
+    intent,
+    suggestedDetail,
+    suggestedSalience,
+    suggestedRecency,
+    suggestedModality,
+    preferredTypes,
+  };
 }
 
 /**
