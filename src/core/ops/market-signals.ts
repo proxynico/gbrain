@@ -6,10 +6,10 @@
 
 import { resolveMarketSignalsConfig } from '../config.ts';
 import { BrainMarketSignalStore, type ReadMarketRatesInput } from '../market-signals/store.ts';
+import { ALL_SOURCES } from '../source-id.ts';
 import { OperationError, type Operation, type OperationContext } from './contract.ts';
 import { sourceScopeOpts } from './context.ts';
 
-const ALL_MARKET_SIGNAL_SOURCES = '__all__';
 const FILTER_FIELDS = [
   'origin',
   'destination',
@@ -34,10 +34,7 @@ function optionalMarketRateFilter(
 }
 
 /** Converts operation parameters into the store's bounded exact-filter input. */
-export function parseReadMarketRatesInput(
-  params: Record<string, unknown>,
-  sourceId: string,
-): ReadMarketRatesInput {
+export function parseReadMarketRatesInput(params: Record<string, unknown>): ReadMarketRatesInput {
   let limit: number | undefined;
   if (params.limit !== undefined) {
     if (typeof params.limit !== 'number' || !Number.isFinite(params.limit)) {
@@ -54,7 +51,6 @@ export function parseReadMarketRatesInput(
   ) as Partial<Record<MarketRateFilter, string>>;
 
   return {
-    sourceId,
     ...filters,
     ...(limit === undefined ? {} : { limit }),
   };
@@ -65,7 +61,7 @@ function requireExpectedMarketSignalSource(
   sourceId: string | undefined,
   expectedSourceId: string,
 ): string {
-  if (!sourceId || sourceId === ALL_MARKET_SIGNAL_SOURCES) {
+  if (!sourceId || sourceId === ALL_SOURCES) {
     throw new OperationError(
       'permission_denied',
       'Market rate rows require exactly one granted source.',
@@ -121,7 +117,7 @@ const readMarketSignals: Operation = {
       rawSourceId: config.raw_source_id,
       derivedSourceId: sourceId,
     });
-    return store.readMarketRates(parseReadMarketRatesInput(params, sourceId));
+    return store.readMarketRates(parseReadMarketRatesInput(params));
   },
 };
 

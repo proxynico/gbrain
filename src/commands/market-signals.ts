@@ -6,6 +6,7 @@ import {
 } from '../core/config.ts';
 import { inspectMarketRates } from '../core/market-signals/selection.ts';
 import { BrainMarketSignalStore } from '../core/market-signals/store.ts';
+import { isMarketRateId, type MarketRateId } from '../core/market-signals/types.ts';
 
 const HELP = `gbrain market-signals — attended, evidence-backed market-rate selection
 
@@ -42,7 +43,7 @@ type KeepArgs = {
   derivedSourceId: string;
   sourceSlug: string;
   forwarder: string;
-  signalIds: Array<`market-rate-${string}`>;
+  signalIds: MarketRateId[];
 };
 
 type ReadArgs = {
@@ -63,8 +64,6 @@ export interface MarketSignalsCommandDependencies {
   config?: GBrainConfig;
   write?: (line: string) => void;
 }
-
-const MARKET_RATE_ID = /^market-rate-[a-f0-9]{64}$/;
 
 /** Reads the next CLI token for a value-bearing market-signals flag. */
 function requiredValue(args: string[], index: number, flag: string): string {
@@ -131,20 +130,20 @@ function parseKeepArgs(args: string[]): KeepArgs {
   let derivedSourceId: string | undefined;
   let sourceSlug: string | undefined;
   let forwarder: string | undefined;
-  const signalIds: Array<`market-rate-${string}`> = [];
+  const signalIds: MarketRateId[] = [];
   const seen = new Set<string>();
 
   for (let index = 0; index < args.length; index += 1) {
     const flag = args[index]!;
     if (flag === '--row') {
       const value = requiredValue(args, index, flag);
-      if (!MARKET_RATE_ID.test(value)) {
+      if (!isMarketRateId(value)) {
         throw new Error(`invalid --row: ${value}`);
       }
-      if (signalIds.includes(value as `market-rate-${string}`)) {
+      if (signalIds.includes(value)) {
         throw new Error(`duplicate --row: ${value}`);
       }
-      signalIds.push(value as `market-rate-${string}`);
+      signalIds.push(value);
       index += 1;
       continue;
     }
@@ -296,7 +295,6 @@ export async function runMarketSignals(
     derivedSourceId: parsed.sourceId,
   });
   const result = await store.readMarketRates({
-    sourceId: parsed.sourceId,
     ...(parsed.origin === undefined ? {} : { origin: parsed.origin }),
     ...(parsed.destination === undefined ? {} : { destination: parsed.destination }),
     ...(parsed.equipment === undefined ? {} : { equipment: parsed.equipment }),

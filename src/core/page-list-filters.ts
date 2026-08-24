@@ -101,12 +101,7 @@ export function parsePageFrontmatterFields(raw: unknown): string[] {
       `frontmatter_fields must be an array of at most ${MAX_FIELDS} fields`,
     );
   }
-  const fields: string[] = [];
-  for (const value of raw) {
-    const field = parseField(value);
-    if (!fields.includes(field)) fields.push(field);
-  }
-  return fields;
+  return [...new Set(Array.from(raw, parseField))];
 }
 
 /** Projects only requested own properties from a page's frontmatter. */

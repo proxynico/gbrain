@@ -1,16 +1,19 @@
 import type { BrainEngine } from '../engine.ts';
 import { assertValidSourceId } from '../source-id.ts';
 import type { Page, PageInput } from '../types.ts';
-import type { MarketRateCandidate, MarketSignalEvidence } from './types.ts';
+import {
+  isMarketRateId,
+  type MarketRateCandidate,
+  type MarketRateId,
+  type MarketSignalEvidence,
+} from './types.ts';
 import { inspectMarketRates } from './selection.ts';
 
 const RATE_PAGE_TYPE = 'market-rate';
-const READ_PAGE_BATCH_SIZE = 500;
 const MAX_RATE_SCAN = 5_000;
 const DEFAULT_READ_LIMIT = 50;
 const MAX_READ_LIMIT = 100;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
-const MARKET_RATE_ID_PATTERN = /^market-rate-([a-f0-9]{64})$/;
 
 export interface MarketSignalStoreOptions {
   rawSourceId: string;
@@ -20,7 +23,7 @@ export interface MarketSignalStoreOptions {
 export interface KeepMarketRatesInput {
   sourceSlug: string;
   forwarder: string;
-  signalIds: Array<`market-rate-${string}`>;
+  signalIds: MarketRateId[];
 }
 
 export interface MarketRate extends MarketRateCandidate {
@@ -28,7 +31,6 @@ export interface MarketRate extends MarketRateCandidate {
 }
 
 export interface ReadMarketRatesInput {
-  sourceId: string;
   origin?: string;
   destination?: string;
   equipment?: string;
@@ -103,8 +105,7 @@ function parseStoredRate(page: Page): MarketRate {
     throw integrityError(`invalid fingerprint for ${page.slug}`);
   }
   const signalId = requiredString(stored.signalId, 'signalId', page.slug);
-  const idMatch = MARKET_RATE_ID_PATTERN.exec(signalId);
-  if (idMatch === null || idMatch[1] !== fingerprint) {
+  if (!isMarketRateId(signalId) || signalId !== `market-rate-${fingerprint}`) {
     throw integrityError(`signalId/fingerprint mismatch for ${page.slug}`);
   }
   if (page.slug !== `market-rate/${signalId}`) {
@@ -115,7 +116,7 @@ function parseStoredRate(page: Page): MarketRate {
   const observedAt = readObservedAt(stored.observedAt, page.slug);
 
   return {
-    signalId: signalId as `market-rate-${string}`,
+    signalId,
     rawSourceId: requiredString(stored.rawSourceId, 'rawSourceId', page.slug),
     sourceSlug: requiredString(stored.sourceSlug, 'sourceSlug', page.slug),
     amount: requiredNumber(stored.amount, 'amount', page.slug),
@@ -178,15 +179,15 @@ function ratePage(rate: MarketRate): PageInput {
 }
 
 /** Validates the non-empty, unique set of selected candidate IDs. */
-function validSelectedIds(value: unknown): Array<`market-rate-${string}`> {
+function validSelectedIds(value: unknown): MarketRateId[] {
   if (!Array.isArray(value) || value.length === 0) {
     throw new Error('market rate selected IDs must be a non-empty array');
   }
   const ids = value.map((entry, index) => {
-    if (typeof entry !== 'string' || !MARKET_RATE_ID_PATTERN.test(entry)) {
+    if (!isMarketRateId(entry)) {
       throw new Error(`invalid market rate selected ID at index ${index}`);
     }
-    return entry as `market-rate-${string}`;
+    return entry;
   });
   if (new Set(ids).size !== ids.length) {
     throw new Error('market rate selected IDs contain a duplicate');
@@ -203,24 +204,17 @@ function clampReadLimit(limit: number | undefined): number {
 
 /** Lists derived rate pages within the fixed integrity-scan budget. */
 async function listRatePages(engine: BrainEngine, sourceId: string): Promise<Page[]> {
-  const pages: Page[] = [];
-  for (let offset = 0; ;) {
-    const requestLimit = Math.min(READ_PAGE_BATCH_SIZE, MAX_RATE_SCAN + 1 - pages.length);
-    const batch = await engine.listPages({
-      sourceId,
-      type: RATE_PAGE_TYPE,
-      slugPrefix: 'market-rate/',
-      sort: 'slug',
-      limit: requestLimit,
-      offset,
-    });
-    pages.push(...batch);
-    if (pages.length > MAX_RATE_SCAN) {
-      throw new Error(`Market rate scan budget exceeded: source ${sourceId} has more than ${MAX_RATE_SCAN} market-rate pages`);
-    }
-    if (batch.length < requestLimit) return pages;
-    offset += batch.length;
+  const pages = await engine.listPages({
+    sourceId,
+    type: RATE_PAGE_TYPE,
+    slugPrefix: 'market-rate/',
+    sort: 'slug',
+    limit: MAX_RATE_SCAN + 1,
+  });
+  if (pages.length > MAX_RATE_SCAN) {
+    throw new Error(`Market rate scan budget exceeded: source ${sourceId} has more than ${MAX_RATE_SCAN} market-rate pages`);
   }
+  return pages;
 }
 
 /** Applies the supported exact-match filters to one stored rate. */
@@ -242,13 +236,6 @@ export class BrainMarketSignalStore {
   ) {
     assertValidSourceId(options.rawSourceId);
     assertValidSourceId(options.derivedSourceId);
-  }
-
-  private assertDerivedSourceId(sourceId: string): void {
-    assertValidSourceId(sourceId);
-    if (sourceId !== this.options.derivedSourceId) {
-      throw new Error(`market rates require the configured derived source '${this.options.derivedSourceId}'`);
-    }
   }
 
   private async assertDerivedWriteSource(): Promise<void> {
@@ -301,8 +288,7 @@ export class BrainMarketSignalStore {
   }
 
   async readMarketRates(input: ReadMarketRatesInput): Promise<{ rates: MarketRate[] }> {
-    this.assertDerivedSourceId(input.sourceId);
-    const rates = (await listRatePages(this.engine, input.sourceId))
+    const rates = (await listRatePages(this.engine, this.options.derivedSourceId))
       .map(parseStoredRate)
       .filter(rate => matchesReadFilters(rate, input))
       .sort((left, right) => (

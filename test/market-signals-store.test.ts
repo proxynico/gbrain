@@ -70,10 +70,10 @@ describe('selected market-rate storage', () => {
       signalId: candidates[1]!.signalId, equipment: '40HQ', state: 'ready',
     })]);
     expect((await store.readMarketRates({
-      sourceId: 'lp-rate-intel', origin: 'Port Alpha', destination: 'Port Beta', equipment: '40HQ',
+      origin: 'Port Alpha', destination: 'Port Beta', equipment: '40HQ',
       currency: 'USD', carrier: 'Carrier One', provider: 'provider@example.test',
     })).rates).toEqual([expect.objectContaining({ signalId: candidates[1]!.signalId })]);
-    expect((await store.readMarketRates({ sourceId: 'lp-rate-intel', origin: 'port alpha' })).rates)
+    expect((await store.readMarketRates({ origin: 'port alpha' })).rates)
       .toEqual([]);
   });
 
@@ -113,7 +113,7 @@ describe('selected market-rate storage', () => {
       frontmatter: {},
     }, { sourceId: 'lp-rate-intel' });
 
-    expect((await store.readMarketRates({ sourceId: 'lp-rate-intel' })).rates).toEqual([]);
+    expect((await store.readMarketRates({})).rates).toEqual([]);
   });
 
   test('rewrites the same selected ID idempotently with stable rate content', async () => {

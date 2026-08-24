@@ -371,8 +371,8 @@ export function tokenizeTitle(title: string): string[] {
  *
  * Hardcoded type filter per D2 (pack-awareness is TODO-1). Soft-deleted
  * pages excluded. Pages with too-short titles excluded (MIN_NAME_LENGTH).
- * Ignore-list applied per CK12: built-in ambiguous tokens dropped unless
- * the user created the corresponding page; user entries always win.
+ * User ignore entries always exclude matching titles. Built-in ambiguous
+ * tokens apply to aliases below; a title row already represents a real page.
  *
  * Returned gazetteer is keyed by lowercase first token; entries with the
  * same first token co-exist in the same bucket (e.g. "Acme" + "Acme Corp").
@@ -390,12 +390,6 @@ export async function buildGazetteer(
     [],
   );
 
-  // Pre-build the existing-slug Set so the ignore-list rule can check
-  // "does this name already correspond to a real page?" in O(1).
-  const existingTitles = new Set<string>();
-  for (const r of rows) {
-    if (r.title) existingTitles.add(r.title);
-  }
   const defaultIgnore = new Set<string>(DEFAULT_IGNORE_LIST);
   const userIgnore = new Set<string>(opts.extraIgnore ?? []);
 
@@ -404,10 +398,8 @@ export async function buildGazetteer(
     if (!row.title) continue;
     if (!hasCJK(row.title) && row.title.length < MIN_NAME_LENGTH) continue;
     if (hasCJK(row.title) && cjkCharCount(row.title) < MIN_CJK_NAME_LENGTH) continue;
-    // User entries are explicit exclusions and override page existence. Only
-    // the built-in ambiguity list keeps CK12's page-existence escape.
+    // User entries are explicit exclusions and override page existence.
     if (userIgnore.has(row.title)) continue;
-    if (defaultIgnore.has(row.title) && !existingTitles.has(row.title)) continue;
 
     const tokens = tokenizeTitle(row.title);
     if (tokens.length === 0) continue;

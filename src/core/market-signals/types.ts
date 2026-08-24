@@ -12,6 +12,15 @@ export interface MarketSignalEvidence {
   sha256: string;
 }
 
+export type MarketRateId = `market-rate-${string}`;
+
+const MARKET_RATE_ID_PATTERN = /^market-rate-[a-f0-9]{64}$/;
+
+/** Narrows a value to the deterministic market-rate identifier contract. */
+export function isMarketRateId(value: unknown): value is MarketRateId {
+  return typeof value === 'string' && MARKET_RATE_ID_PATTERN.test(value);
+}
+
 /** A single equipment-price pair suggested from a headed rate table. */
 export interface ExtractedMarketRateRow {
   amount: number;
@@ -26,7 +35,7 @@ export interface ExtractedMarketRateRow {
 }
 
 export interface MarketRateCandidate extends ExtractedMarketRateRow {
-  signalId: `market-rate-${string}`;
+  signalId: MarketRateId;
   sourceSlug: string;
   rawSourceId: string;
   observedAt?: string;
