@@ -178,6 +178,32 @@ interface CardPageRow {
   last_retrieved_at: Date | string | null;
 }
 
+/**
+ * Source scope for a card lookup. A scalar `sourceId` pins one source; a
+ * `sourceIds` array spans a federated caller's granted set; `{}` means the
+ * trusted-local unqualified read, which spans every source. Mirrors the shape
+ * `sourceScopeOpts` already returns for search and the other read verbs.
+ */
+export type EntityCardScope = { sourceId?: string; sourceIds?: string[] };
+
+function toScope(s: string | EntityCardScope | undefined): EntityCardScope {
+  if (s === undefined) return {};
+  return typeof s === 'string' ? { sourceId: s } : s;
+}
+
+/** Append the scope predicate to a raw query, pushing its param positionally. */
+function scopeClause(scope: EntityCardScope, params: unknown[]): string {
+  if (scope.sourceIds && scope.sourceIds.length > 0) {
+    params.push(scope.sourceIds);
+    return ` AND source_id = ANY($${params.length}::text[])`;
+  }
+  if (scope.sourceId) {
+    params.push(scope.sourceId);
+    return ` AND source_id = $${params.length}`;
+  }
+  return '';
+}
+
 /** Resolution arm rank: lower = higher confidence (frozen precedence ladder). */
 const ARM_ALIAS = 0;
 const ARM_EXACT = 1;
@@ -185,10 +211,11 @@ const ARM_SUFFIX = 2;
 
 export async function buildEntityCard(
   engine: BrainEngine,
-  sourceId: string,
+  sourceIdOrScope: string | EntityCardScope | undefined,
   name: string,
   opts: EntityCardOpts,
 ): Promise<EntityCardResult> {
+  const scope = toScope(sourceIdOrScope);
   const trimmed = (name ?? '').trim();
   if (!trimmed) return { found: false, suggestions: [] };
 
@@ -221,7 +248,7 @@ export async function buildEntityCard(
   // Arm 1 — alias-first. Guarded: pre-migration brains lack page_aliases.
   if (norm) {
     try {
-      const aliasMap = await engine.resolveAliases([norm], { sourceId });
+      const aliasMap = await engine.resolveAliases([norm], scope);
       for (const hit of aliasMap.get(norm) ?? []) consider(hit.slug, ARM_ALIAS);
     } catch {
       /* no page_aliases table — degrade to arm 2 [E3] */
@@ -232,16 +259,17 @@ export async function buildEntityCard(
   // card's tie-break needs. Guarded like the reflex.
   let rows: CardPageRow[] = [];
   try {
+    const params: unknown[] = [titleLc, exactSlugs, `%/${slug || trimmed}`];
+    const sourceClause = scopeClause(scope, params);
     rows = await engine.executeRaw<CardPageRow>(
       `SELECT slug, source_id, title, type, frontmatter, compiled_truth, updated_at,
               GREATEST(last_retrieved_at, (SELECT r.last_retrieved_at FROM page_retrievals r WHERE r.page_id = pages.id)) AS last_retrieved_at
          FROM pages
         WHERE deleted_at IS NULL
-          AND source_id = $1
-          AND ( lower(title) = $2
-             OR slug = ANY($3::text[])
-             OR slug LIKE $4 )${privatePredicate}`,
-      [sourceId, titleLc, exactSlugs, `%/${slug || trimmed}`],
+          AND ( lower(title) = $1
+             OR slug = ANY($2::text[])
+             OR slug LIKE $3 )${sourceClause}${privatePredicate}`,
+      params,
     );
   } catch {
     rows = [];
@@ -257,12 +285,14 @@ export async function buildEntityCard(
   const missing = [...rankBySlug.keys()].filter(s => !rowBySlug.has(s));
   if (missing.length) {
     try {
+      const extraParams: unknown[] = [missing];
+      const extraClause = scopeClause(scope, extraParams);
       const extra = await engine.executeRaw<CardPageRow>(
         `SELECT slug, source_id, title, type, frontmatter, compiled_truth, updated_at,
               GREATEST(last_retrieved_at, (SELECT r.last_retrieved_at FROM page_retrievals r WHERE r.page_id = pages.id)) AS last_retrieved_at
            FROM pages
-          WHERE deleted_at IS NULL AND source_id = $1 AND slug = ANY($2::text[])${privatePredicate}`,
-        [sourceId, missing],
+          WHERE deleted_at IS NULL AND slug = ANY($1::text[])${extraClause}${privatePredicate}`,
+        extraParams,
       );
       for (const r of extra) rowBySlug.set(r.slug, r);
     } catch {
@@ -275,7 +305,9 @@ export async function buildEntityCard(
   // prefer a linkable entity page (the source pack's entity types) over
   // transcript/note containers. Recency remains the final tie-break within
   // the same match shape.
-  const { types: linkable } = await loadLinkableTypes(engine, sourceId).catch(() => ({ types: [] as string[], pack: null }));
+  // The pack is brain-level, so any source in scope yields the same entity types.
+  const scopeSourceIds = scope.sourceIds ?? [scope.sourceId ?? 'default'];
+  const { types: linkable } = await loadLinkableTypes(engine, scopeSourceIds[0]).catch(() => ({ types: [] as string[], pack: null }));
   const entityTypes = new Set(linkable);
   const candidates = [...rankBySlug.entries()]
     .map(([s, rank]) => ({ slug: s, rank, row: rowBySlug.get(s) }))
@@ -294,8 +326,8 @@ export async function buildEntityCard(
   }
   if (candidates.length === 0) {
     return {
-      found: false, suggestions: await nearMissSuggestions(engine, sourceId, trimmed, excludePrivate),
-      ...(opts.includeReferences ? { coverage: await readMentionCoverage(engine, [sourceId]).catch(() => undefined) } : {}),
+      found: false, suggestions: await nearMissSuggestions(engine, scope, trimmed, excludePrivate),
+      ...(opts.includeReferences ? { coverage: await readMentionCoverage(engine, scopeSourceIds).catch(() => undefined) } : {}),
     };
   }
 
@@ -307,8 +339,10 @@ export async function buildEntityCard(
     create_safety: 'exists',
   }));
 
-  const card = await assembleCard(engine, sourceId, best.row, opts.remote, excludePrivate, opts.eligibility ?? {});
-  if (opts.includeReferences) Object.assign(card, await cardReferences(engine, sourceId, best.row, opts, excludePrivate, entityTypes));
+  // The card is assembled against the found page's own source, so a federated
+  // hit's links, timeline and facts come from the source that owns the page.
+  const card = await assembleCard(engine, best.row.source_id, best.row, opts.remote, excludePrivate, opts.eligibility ?? {});
+  if (opts.includeReferences) Object.assign(card, await cardReferences(engine, best.row.source_id, best.row, opts, excludePrivate, entityTypes));
   return {
     found: true,
     card,
@@ -557,12 +591,12 @@ async function assembleCard(
  */
 async function nearMissSuggestions(
   engine: BrainEngine,
-  sourceId: string,
+  scope: EntityCardScope,
   name: string,
   excludePrivate = false,
 ): Promise<EntitySuggestion[]> {
   try {
-    const raw = await engine.searchKeyword(name, { limit: SUGGESTION_CAP, sourceId, excludePrivate });
+    const raw = await engine.searchKeyword(name, { limit: SUGGESTION_CAP, ...scope, excludePrivate });
     const results = raw as SearchResult[];
     // #3783 — direct FTS path: every row is a keyword hit by construction.
     markKeywordHits(results);
