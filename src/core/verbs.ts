@@ -216,7 +216,13 @@ const entity: Operation = {
     }
     const t0 = Date.now();
     const { buildEntityCard } = await import('./verbs/entity-card.ts');
-    const result = await buildEntityCard(ctx.engine, ctx.sourceId ?? 'default', name, {
+    const { federatedSearchScope } = await import('./ops/context.ts');
+    // Was `ctx.sourceId ?? 'default'`: an unqualified lookup pinned the literal
+    // source 'default', so on a multi-source brain entity reported found:false
+    // for pages get_page and search both resolve. federatedSearchScope is the
+    // same visibility ladder those use — grant array, explicit scalar, else the
+    // trusted-local federated span.
+    const result = await buildEntityCard(ctx.engine, federatedSearchScope(ctx), name, {
       remote: ctx.remote !== false,
     });
     return {

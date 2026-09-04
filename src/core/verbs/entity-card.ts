@@ -103,6 +103,32 @@ interface CardPageRow {
   last_retrieved_at: Date | string | null;
 }
 
+/**
+ * Source scope for a card lookup. A scalar `sourceId` pins one source; a
+ * `sourceIds` array spans a federated caller's granted set; `{}` means the
+ * trusted-local unqualified read, which spans every source. Mirrors the shape
+ * `sourceScopeOpts` already returns for search and the other read verbs.
+ */
+export type EntityCardScope = { sourceId?: string; sourceIds?: string[] };
+
+function toScope(s: string | EntityCardScope | undefined): EntityCardScope {
+  if (s === undefined) return {};
+  return typeof s === 'string' ? { sourceId: s } : s;
+}
+
+/** Append the scope predicate to a raw query, pushing its param positionally. */
+function scopeClause(scope: EntityCardScope, params: unknown[]): string {
+  if (scope.sourceIds && scope.sourceIds.length > 0) {
+    params.push(scope.sourceIds);
+    return ` AND source_id = ANY($${params.length}::text[])`;
+  }
+  if (scope.sourceId) {
+    params.push(scope.sourceId);
+    return ` AND source_id = $${params.length}`;
+  }
+  return '';
+}
+
 /** Resolution arm rank: lower = higher confidence (frozen precedence ladder). */
 const ARM_ALIAS = 0;
 const ARM_EXACT = 1;
@@ -110,10 +136,11 @@ const ARM_SUFFIX = 2;
 
 export async function buildEntityCard(
   engine: BrainEngine,
-  sourceId: string,
+  sourceIdOrScope: string | EntityCardScope | undefined,
   name: string,
   opts: { remote: boolean },
 ): Promise<EntityCardResult> {
+  const scope = toScope(sourceIdOrScope);
   const trimmed = (name ?? '').trim();
   if (!trimmed) return { found: false, suggestions: [] };
 
@@ -146,7 +173,7 @@ export async function buildEntityCard(
   // Arm 1 — alias-first. Guarded: pre-migration brains lack page_aliases.
   if (norm) {
     try {
-      const aliasMap = await engine.resolveAliases([norm], { sourceId });
+      const aliasMap = await engine.resolveAliases([norm], scope);
       for (const hit of aliasMap.get(norm) ?? []) consider(hit.slug, ARM_ALIAS);
     } catch {
       /* no page_aliases table — degrade to arm 2 [E3] */
@@ -157,15 +184,16 @@ export async function buildEntityCard(
   // card's tie-break needs. Guarded like the reflex.
   let rows: CardPageRow[] = [];
   try {
+    const params: unknown[] = [titleLc, exactSlugs, `%/${slug || trimmed}`];
+    const sourceClause = scopeClause(scope, params);
     rows = await engine.executeRaw<CardPageRow>(
       `SELECT slug, source_id, title, type, frontmatter, compiled_truth, updated_at, last_retrieved_at
          FROM pages
         WHERE deleted_at IS NULL
-          AND source_id = $1
-          AND ( lower(title) = $2
-             OR slug = ANY($3::text[])
-             OR slug LIKE $4 )${privatePredicate}`,
-      [sourceId, titleLc, exactSlugs, `%/${slug || trimmed}`],
+          AND ( lower(title) = $1
+             OR slug = ANY($2::text[])
+             OR slug LIKE $3 )${sourceClause}${privatePredicate}`,
+      params,
     );
   } catch {
     rows = [];
@@ -181,11 +209,13 @@ export async function buildEntityCard(
   const missing = [...rankBySlug.keys()].filter(s => !rowBySlug.has(s));
   if (missing.length) {
     try {
+      const extraParams: unknown[] = [missing];
+      const extraClause = scopeClause(scope, extraParams);
       const extra = await engine.executeRaw<CardPageRow>(
         `SELECT slug, source_id, title, type, frontmatter, compiled_truth, updated_at, last_retrieved_at
            FROM pages
-          WHERE deleted_at IS NULL AND source_id = $1 AND slug = ANY($2::text[])${privatePredicate}`,
-        [sourceId, missing],
+          WHERE deleted_at IS NULL AND slug = ANY($1::text[])${extraClause}${privatePredicate}`,
+        extraParams,
       );
       for (const r of extra) rowBySlug.set(r.slug, r);
     } catch {
@@ -208,7 +238,7 @@ export async function buildEntityCard(
       || lastTouchedMs(b.row) - lastTouchedMs(a.row));
 
   if (candidates.length === 0) {
-    return { found: false, suggestions: await nearMissSuggestions(engine, sourceId, trimmed, excludePrivate) };
+    return { found: false, suggestions: await nearMissSuggestions(engine, scope, trimmed, excludePrivate) };
   }
 
   const best = candidates[0];
@@ -219,7 +249,7 @@ export async function buildEntityCard(
     create_safety: 'exists',
   }));
 
-  const card = await assembleCard(engine, sourceId, best.row, opts.remote);
+  const card = await assembleCard(engine, best.row.source_id, best.row, opts.remote);
   return {
     found: true,
     card,
@@ -414,12 +444,12 @@ async function assembleCard(
  */
 async function nearMissSuggestions(
   engine: BrainEngine,
-  sourceId: string,
+  scope: EntityCardScope,
   name: string,
   excludePrivate = false,
 ): Promise<EntitySuggestion[]> {
   try {
-    const raw = await engine.searchKeyword(name, { limit: SUGGESTION_CAP, sourceId, excludePrivate });
+    const raw = await engine.searchKeyword(name, { limit: SUGGESTION_CAP, ...scope, excludePrivate });
     const results = raw as SearchResult[];
     // #3783 — direct FTS path: every row is a keyword hit by construction.
     markKeywordHits(results);
