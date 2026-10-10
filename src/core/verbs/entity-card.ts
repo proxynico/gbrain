@@ -76,7 +76,8 @@ export interface EntityOpenThread {
 }
 
 export interface EntityCard {
-  entity: { slug: string; title: string; type: string | null };
+  /** source_id: the source that owns the page (a federated lookup can resolve outside the caller's default). */
+  entity: { slug: string; title: string; type: string | null; source_id?: string };
   /** page_aliases reverse lookup (normalized forms). Empty on pre-migration brains. */
   aka: string[];
   /** Privacy-safe synopsis — same fence boundary as get_page. */
@@ -352,7 +353,10 @@ export async function buildEntityCard(
 
 function exactMatchPreference(row: CardPageRow, exactSlugs: string[], entityTypes: ReadonlySet<string>): number {
   if (exactSlugs.includes(row.slug)) return 0;
-  return entityTypes.has(row.type ?? '') ? 1 : 2;
+  if (!entityTypes.has(row.type ?? '')) return 3;
+  // A curated entity page beats an auto-extracted stub with the same title;
+  // otherwise the recency tie-break decides, and every search touches the stub.
+  return row.frontmatter?.provenance === 'auto-extracted' ? 2 : 1;
 }
 
 /**
@@ -564,7 +568,7 @@ async function assembleCard(
 
   const pageTrust = (await loadPageTrust(engine, [{ source_id: sourceId, slug: pageSlug }]).catch(() => null))?.byKey.get(`${sourceId}\u0000${pageSlug}`);
   return {
-    entity: { slug: pageSlug, title: row.title ?? pageSlug, type: row.type ?? null },
+    entity: { slug: pageSlug, title: row.title ?? pageSlug, type: row.type ?? null, source_id: sourceId },
     ...(pageTrust ?? { trust_tier: 'unknown' as const, origin: 'unrecorded' }),
     ...(isQuarantined(row.frontmatter) ? { quarantined: true as const } : {}),
     aka,

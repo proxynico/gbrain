@@ -39,7 +39,7 @@ import { volunteerContext, type VolunteeredPage } from './volunteer.ts';
 import { getBrainHotMemoryMeta } from '../facts/meta-hook.ts';
 import { collapseHotFacts } from '../facts/capture-dedup.ts';
 import type { ArmStatus, RawFactRef } from './delta-cursor.ts';
-import { buildEntityCard, type EntityCard, type EntityOpenThread } from '../verbs/entity-card.ts';
+import { buildEntityCard, type EntityCard, type EntityCardScope, type EntityOpenThread } from '../verbs/entity-card.ts';
 import { isNewerMentionsEnabled, readNewerMentions, renderNewerMentionRow, NEWER_MENTIONS_HEADER, NEWER_MENTIONS_PACK_CHARS, type NewerMentions } from '../mentions/newer-mentions.ts';
 import { estimateTokens } from '../search/token-budget.ts';
 import type { DecideSlotMeta } from '../search/decide-stage.ts';
@@ -191,6 +191,9 @@ export interface TurnContextResult {
 
 export interface AssembleTurnContextOpts {
   sourceId: string;
+  /** Entity-card lookup scope for pack/delta; the verbs pass the caller's
+   * federated scope so a name resolves in any source it can read. */
+  cardScope?: EntityCardScope;
   /** Recent turns, oldest → newest. Optional for pack/delta (may run cold). */
   window?: WindowTurn[];
   /** Already-surfaced context — drives slug-only suppression + volunteer dedupe. */
@@ -582,10 +585,11 @@ async function assemblePack(
     for (const name of entities) {
       if (deadlineAt !== null && Date.now() >= deadlineAt) return;
       try {
-        const res = await buildEntityCard(engine, opts.sourceId, name, { remote, eligibility: policy, omitQuarantined: opts.includeQuarantined !== true });
+        const res = await buildEntityCard(engine, opts.cardScope ?? opts.sourceId, name, { remote, eligibility: policy, omitQuarantined: opts.includeQuarantined !== true });
         if (res.found && res.card) {
-          const verdict = (await pageActivationVerdicts(engine, [{ source_id: opts.sourceId, slug: res.card.entity.slug }], policy))
-            .get(pageKey({ source_id: opts.sourceId, slug: res.card.entity.slug }));
+          const cardSource = res.card.entity.source_id ?? opts.sourceId;
+          const verdict = (await pageActivationVerdicts(engine, [{ source_id: cardSource, slug: res.card.entity.slug }], policy))
+            .get(pageKey({ source_id: cardSource, slug: res.card.entity.slug }));
           if (verdict?.suppressed) acc.withheld++;
           // Under trust.agent_activation=allow (the default) a flagged entity page stays, labeled unconfirmed.
           else if (verdict && !verdict.belowFloor) acc.cards.push(verdict.unconfirmed ? { ...res.card, unconfirmed: true as const } : res.card);
@@ -781,7 +785,7 @@ async function assembleDelta(
     for (const name of entities) {
       if (pastDeadline()) return;
       try {
-        const res = await buildEntityCard(engine, opts.sourceId, name, { remote, eligibility: { floor: policy.floor }, omitQuarantined: true });
+        const res = await buildEntityCard(engine, opts.cardScope ?? opts.sourceId, name, { remote, eligibility: { floor: policy.floor }, omitQuarantined: true });
         if (res.found && res.card) {
           for (const t of res.card.open_threads ?? []) {
             if (!since || (t.date && isAfter(t.date, since))) items.push(t);

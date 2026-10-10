@@ -82,4 +82,28 @@ describe('entity verb federated scope', () => {
     );
     expect(r.found).toBe(false);
   });
+
+  test('a curated pack entity page beats an auto-extracted stub with the same title', async () => {
+    await engine.putPage('companies/acme-shipping', {
+      type: 'company', title: 'Acme Shipping', compiled_truth: 'stub',
+      frontmatter: { type: 'company', provenance: 'auto-extracted' },
+    }, { sourceId: 'beta' });
+    await engine.putPage('orgs/carriers/acme-shipping', {
+      type: 'carrier', title: 'Acme Shipping', compiled_truth: 'curated dossier',
+      frontmatter: { type: 'carrier' },
+    }, { sourceId: 'alpha' });
+    await engine.putPage('trade/carriers/acme-shipping', {
+      type: 'note', title: 'Acme Shipping', compiled_truth: 'export',
+      frontmatter: {},
+    }, { sourceId: 'beta' });
+    const r: any = await entity.handler(ctxOf(), { name: 'Acme Shipping' });
+    expect(r.found).toBe(true);
+    expect(r.card.entity.slug).toBe('orgs/carriers/acme-shipping');
+  });
+
+  test('context_pack builds cards across the federated span', async () => {
+    const contextPack = operations.find(o => o.name === 'context_pack')!;
+    const r: any = await contextPack.handler(ctxOf(), { entities: 'Ada Lovelace' });
+    expect(r.cards.map((c: any) => c.slug)).toEqual(['people/ada-lovelace']);
+  });
 });

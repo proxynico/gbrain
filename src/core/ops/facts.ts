@@ -687,6 +687,7 @@ const context_pack: Operation = {
       ? { cards: [], facts: [], text: '', pointers: [], factsCount: 0 } as unknown as Awaited<ReturnType<typeof assembleContextPack>>
       : await assembleContextPack(ctx.engine, {
         sourceId,
+        cardScope: federatedSearchScope(ctx),
         entities,
         since,
         sessionId: typeof p.session_id === 'string' ? p.session_id : undefined,
@@ -934,6 +935,7 @@ const delta: Operation = {
     const effectiveSince = start.pages.since;
     const res = await assembleDeltaContext(ctx.engine, {
       sourceId,
+      cardScope: federatedSearchScope(ctx),
       since: effectiveSince,
       ...(start.pages.slug !== undefined ? { sinceSlug: start.pages.slug } : {}),
       factsAfter: start.facts,
