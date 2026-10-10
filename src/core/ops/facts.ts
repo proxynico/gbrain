@@ -521,8 +521,10 @@ const context_pack: Operation = {
       typeof p.budget_tokens === 'number' && Number.isFinite(p.budget_tokens) && p.budget_tokens > 0
         ? Math.floor(p.budget_tokens)
         : null;
+    const { federatedSearchScope } = await import('./context.ts');
     const res = await assembleContextPack(ctx.engine, {
       sourceId,
+      cardScope: federatedSearchScope(ctx),
       entities,
       since,
       sessionId: typeof p.session_id === 'string' ? p.session_id : undefined,
@@ -681,8 +683,10 @@ const delta: Operation = {
     const explicitSlug = typeof p.since_slug === 'string' ? p.since_slug : undefined;
     const sinceSlug = explicitSlug ?? cursorSlug;
 
+    const { federatedSearchScope } = await import('./context.ts');
     const res = await assembleDeltaContext(ctx.engine, {
       sourceId,
+      cardScope: federatedSearchScope(ctx),
       since: effectiveSince,
       ...(sinceSlug !== undefined ? { sinceSlug } : {}),
       entities: parseEntityList(p.entities),

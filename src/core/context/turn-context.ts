@@ -34,7 +34,7 @@ import {
 } from './retrieval-reflex.ts';
 import { volunteerContext, type VolunteeredPage } from './volunteer.ts';
 import { getBrainHotMemoryMeta } from '../facts/meta-hook.ts';
-import { buildEntityCard, type EntityCard, type EntityOpenThread } from '../verbs/entity-card.ts';
+import { buildEntityCard, type EntityCard, type EntityCardScope, type EntityOpenThread } from '../verbs/entity-card.ts';
 
 /**
  * v0.45.7 ambient recall (issue #1). The per-turn assembler is extended into the
@@ -136,6 +136,9 @@ export interface TurnContextResult {
 
 export interface AssembleTurnContextOpts {
   sourceId: string;
+  /** Entity-card lookup scope for pack/delta; the verbs pass the caller's
+   * federated scope so a name resolves in any source it can read. */
+  cardScope?: EntityCardScope;
   /** Recent turns, oldest → newest. Optional for pack/delta (may run cold). */
   window?: WindowTurn[];
   /** Already-surfaced context — drives slug-only suppression + volunteer dedupe. */
@@ -461,7 +464,7 @@ async function assemblePack(
     for (const name of entities) {
       if (deadlineAt !== null && Date.now() >= deadlineAt) return;
       try {
-        const res = await buildEntityCard(engine, opts.sourceId, name, { remote });
+        const res = await buildEntityCard(engine, opts.cardScope ?? opts.sourceId, name, { remote });
         if (res.found && res.card) acc.cards.push(res.card);
       } catch {
         /* fail-soft: skip this entity */
@@ -591,7 +594,7 @@ async function assembleDelta(
     for (const name of entities) {
       if (deadlineAt !== null && Date.now() >= deadlineAt) return;
       try {
-        const res = await buildEntityCard(engine, opts.sourceId, name, { remote });
+        const res = await buildEntityCard(engine, opts.cardScope ?? opts.sourceId, name, { remote });
         if (res.found && res.card) {
           for (const t of res.card.open_threads ?? []) {
             if (!since || (t.date && isAfter(t.date, since))) acc.threads.push(t);

@@ -32,7 +32,8 @@ const OPEN_THREADS_CAP = 3;
 const OPEN_THREAD_TIMELINE_WINDOW_DAYS = 90;
 const SUGGESTION_CAP = 3;
 const FACT_FETCH_CAP = 100;
-const ENTITY_PAGE_TYPES = new Set(['person', 'company', 'organization', 'entity']);
+// carrier and member are the nico-brain pack's own entity types (primitive: entity).
+const ENTITY_PAGE_TYPES = new Set(['person', 'company', 'organization', 'entity', 'carrier', 'member']);
 
 export interface EntityCardEdge {
   type: string;
@@ -259,7 +260,10 @@ export async function buildEntityCard(
 
 function exactMatchPreference(row: CardPageRow, exactSlugs: string[]): number {
   if (exactSlugs.includes(row.slug)) return 0;
-  return ENTITY_PAGE_TYPES.has(row.type ?? '') ? 1 : 2;
+  if (!ENTITY_PAGE_TYPES.has(row.type ?? '')) return 3;
+  // A curated entity page beats an auto-extracted stub with the same title;
+  // otherwise the recency tie-break decides, and every search touches the stub.
+  return row.frontmatter?.provenance === 'auto-extracted' ? 2 : 1;
 }
 
 async function assembleCard(
