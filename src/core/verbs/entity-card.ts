@@ -37,6 +37,7 @@ import type { NewerMentions } from '../mentions/newer-mentions.ts';
 import { loadLinkableTypes } from '../mentions/policy.ts';
 import { readMentionCoverage, type MentionCoverage } from '../mentions/coverage.ts';
 import { encodeCursor, readReferrerGroups, PAGE_DEFAULT_LIMIT, type ReferenceRow } from '../mentions/referrers.ts';
+import { ALL_SOURCES } from '../source-id.ts';
 
 const EDGE_CAP = 10;
 const OPEN_THREADS_CAP = 3;
@@ -121,7 +122,7 @@ export interface EntityCard {
 export interface ReferenceGroupView {
   canonical_type: string;
   total: number;
-  rows: Array<Omit<ReferenceRow, 'source_id'>>;
+  rows: ReferenceRow[];
   /** The call that returns the rest of a truncated group (`requires_surface` when this connection cannot call it). */
   next?: { tool: 'get_backlinks'; arguments: Record<string, unknown>; requires_surface?: 'starter' };
 }
@@ -343,7 +344,7 @@ export async function buildEntityCard(
   // The card is assembled against the found page's own source, so a federated
   // hit's links, timeline and facts come from the source that owns the page.
   const card = await assembleCard(engine, best.row.source_id, best.row, opts.remote, excludePrivate, opts.eligibility ?? {});
-  if (opts.includeReferences) Object.assign(card, await cardReferences(engine, best.row.source_id, best.row, opts, excludePrivate, entityTypes));
+  if (opts.includeReferences) Object.assign(card, await cardReferences(engine, scope, best.row.source_id, best.row, opts, excludePrivate, entityTypes));
   return {
     found: true,
     card,
@@ -360,25 +361,47 @@ function exactMatchPreference(row: CardPageRow, exactSlugs: string[], entityType
 }
 
 /**
+ * Sources whose pages count as references, matching what a `get_backlinks`
+ * continuation with `__all__` reads for the same caller: a remote caller's
+ * granted set, and every source for a trusted local read. A pinned source
+ * keeps the card to that source. A vault entity's emails live in another
+ * source, so own-source-only references would leave them off the card.
+ * `__all__` resolves its target as the first source holding the slug, so a
+ * slug another source shares keeps the card to its own source and the
+ * count and continuation agree.
+ */
+async function referrerSources(engine: BrainEngine, scope: EntityCardScope, sourceId: string, slug: string, remote: boolean): Promise<string[]> {
+  if (scope.sourceId) return [sourceId];
+  const sources = remote
+    ? (scope.sourceIds?.length ? scope.sourceIds : [sourceId])
+    : (await engine.executeRaw<{ id: string }>('SELECT id FROM sources ORDER BY id')).map(r => r.id);
+  if (sources.length < 2) return sources;
+  const [{ n }] = await engine.executeRaw<{ n: number }>(
+    'SELECT count(*)::int AS n FROM pages WHERE slug = $1 AND source_id = ANY($2::text[]) AND deleted_at IS NULL', [slug, sources]);
+  return n === 1 ? sources : [sourceId];
+}
+
+/**
  * The `entity` verb's reference fields: every page linking here (mentions
  * included), grouped by pack-canonical type with the continuation for a
- * truncated group, and the source's mention coverage. Fail-soft: a failed
- * read leaves the card without them rather than failing the lookup.
+ * truncated group, and the referring sources' mention coverage. Fail-soft: a
+ * failed read leaves the card without them rather than failing the lookup.
  */
-async function cardReferences(engine: BrainEngine, sourceId: string, row: CardPageRow, opts: EntityCardOpts, excludePrivate: boolean,
-  entityTypes: ReadonlySet<string>): Promise<Pick<EntityCard, 'referenced_by_count' | 'referenced_by' | 'coverage'>> {
+async function cardReferences(engine: BrainEngine, scope: EntityCardScope, sourceId: string, row: CardPageRow, opts: EntityCardOpts,
+  excludePrivate: boolean, entityTypes: ReadonlySet<string>): Promise<Pick<EntityCard, 'referenced_by_count' | 'referenced_by' | 'coverage'>> {
   try {
     const { pack } = await loadLinkableTypes(engine, sourceId);
-    const { total, groups } = await readReferrerGroups(engine, { slug: row.slug, sourceId, referrerSources: [sourceId], excludePrivate, pack,
+    const sources = await referrerSources(engine, scope, sourceId, row.slug, opts.remote);
+    const { total, groups } = await readReferrerGroups(engine, { slug: row.slug, sourceId, referrerSources: sources, excludePrivate, pack,
       keepVisibility: opts.remote ? ['world'] : ['private', 'world'], eligibility: opts.eligibility });
-    let coverage = await readMentionCoverage(engine, [sourceId]);
+    let coverage = await readMentionCoverage(engine, sources);
     if (coverage.state !== 'disabled' && !entityTypes.has(row.type ?? '')) coverage = { ...coverage, state: 'type_not_linkable', degraded: true };
     const referenced_by = groups.map((g): ReferenceGroupView => {
-      const rows = g.rows.map(({ source_id: _s, ...rest }) => rest);
-      if (g.rows.length >= g.total) return { canonical_type: g.canonical_type, total: g.total, rows };
-      const last = g.rows[g.rows.length - 1];
+      const rows = g.rows;
+      if (rows.length >= g.total) return { canonical_type: g.canonical_type, total: g.total, rows };
+      const last = rows[rows.length - 1];
       return { canonical_type: g.canonical_type, total: g.total, rows, next: { tool: 'get_backlinks', arguments: {
-        slug: row.slug, source_id: sourceId, type: g.canonical_type, group: 'page', limit: PAGE_DEFAULT_LIMIT,
+        slug: row.slug, source_id: sources.length > 1 ? ALL_SOURCES : sourceId, type: g.canonical_type, group: 'page', limit: PAGE_DEFAULT_LIMIT,
         ...(last ? { cursor: encodeCursor(last) } : {}) }, ...(opts.surfaceCeiling === 'verbs' ? { requires_surface: 'starter' as const } : {}) } };
     });
     return { referenced_by_count: total, referenced_by, coverage };
