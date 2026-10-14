@@ -85,7 +85,9 @@ export interface ConflictCandidateRow {
  * BEFORE the limit (so the fact itself and ineligible rows never take a slot):
  * the decideSingleFact guards (same source, entity and visibility, active and
  * not expired, candidate source_markdown_slug unset or equal to the fact's
- * entity), a matching embedding, and no audit rows.
+ * entity), a matching embedding, and no audit rows. Two facts imported from the
+ * same note are never paired: one note cannot correct itself, and a later
+ * import date is not a later real-world event.
  */
 export async function conflictNeighbours(engine: BrainEngine, factId: number, sourceId: string): Promise<ConflictCandidateRow[]> {
   const rows = await engine.executeRaw<ConflictCandidateRow>(
@@ -98,6 +100,7 @@ export async function conflictNeighbours(engine: BrainEngine, factId: number, so
         AND c.embedding IS NOT NULL AND c.embedding_model = n.embedding_model AND c.embedded_text_hash = md5(c.fact)
         AND (c.source_markdown_slug IS NULL OR c.source_markdown_slug = n.entity_slug)
         AND c.source <> ALL($2::text[])
+        AND NOT (c.source = 'sync:import' AND n.source = 'sync:import' AND coalesce(c.source_session = n.source_session, false))
       ORDER BY c.embedding <=> n.embedding, c.id
       LIMIT $4`,
     [factId, [...AUDIT_ROW_SOURCES], sourceId, CONFLICT_NEIGHBOURS],
