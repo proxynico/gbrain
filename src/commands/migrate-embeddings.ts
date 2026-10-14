@@ -602,9 +602,14 @@ export async function executeMigrationFlow(
   let expectedSources: string | undefined;
   let lost = false;
   let renewing: Promise<void> | undefined;
+  let transactionFenced = false;
   const assertOwned = async (tx?: BrainEngine) => {
-    if (!tx && renewing) await renewing;
+    if (renewing) await renewing;
     if (lost) throw new Error('Migration lock lease lost; durable work retained. Inspect --status before resuming.');
+    // FOR SHARE fences the lease rows until commit. An outside UPDATE would
+    // wait on our own transaction and falsely report a lost lease on timeout.
+    // The next foreground check outside the transaction resumes renewal.
+    transactionFenced = tx !== undefined;
     if (tx) await assertMigrationLeases(tx, heldLocks);
     else for (const lock of heldLocks) {
       if (!await lock.refresh({ signal: AbortSignal.timeout(30_000) })) { lost = true; controller.abort(); throw new Error('Migration lock lease lost; further mutations refused.'); }
@@ -616,7 +621,7 @@ export async function executeMigrationFlow(
     }
   };
   const heartbeat = setInterval(() => {
-    if (renewing) return;
+    if (renewing || transactionFenced) return;
     renewing = assertOwned().catch(() => { lost = true; controller.abort(); }).finally(() => { renewing = undefined; });
   }, 15_000);
   try {

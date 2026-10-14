@@ -12,6 +12,7 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## Unreleased
 
+- Embedding migration heartbeat waits while its own transaction holds lease rows with `FOR SHARE`; the next foreground check renews before continuing, avoiding a false lease-loss timeout.
 - Search keeps a historical title collision behind its current owner after reranking. Explicit historical queries and slug lookups keep their relevance ordering.
 - Entity and context-pack name lookups prefer a current exact-title page over an archived or superseded page, even when the current owner is a note. Explicit historical slug lookups remain available.
 
