@@ -8,8 +8,9 @@
  * (traversePaths) — the card is a latency contract, not a graph walk.
  *
  * Resolution precedence (frozen): alias > exact slug > exact title >
- * slug-suffix. Exact-title collisions prefer entity-shaped pages over
- * transcript/note containers; otherwise ties break on GREATEST(updated_at,
+ * slug-suffix. Exact-title collisions prefer current pages over historical
+ * pages, then entity-shaped pages over transcript/note containers; otherwise
+ * ties break on GREATEST(updated_at,
  * last_retrieved_at) — "last_touched" is the card's OUTPUT name, not a
  * column. Multi-hit → best match wins, runners-up land in `suggestions`.
  * Miss → `found: false` + keyword near-misses with create_safety hints. NEVER
@@ -354,6 +355,10 @@ export async function buildEntityCard(
 
 function exactMatchPreference(row: CardPageRow, exactSlugs: string[], entityTypes: ReadonlySet<string>): number {
   if (exactSlugs.includes(row.slug)) return 0;
+  // Historical pages remain addressable by slug, but a current exact-title
+  // owner beats an archived entity even when the current page is a note.
+  const status = String(row.frontmatter?.status ?? '').toLowerCase();
+  if (/(?:^|\/)archive(?:\/|$)/.test(row.slug) || /archived|superseded|retired/.test(status)) return 4;
   if (!entityTypes.has(row.type ?? '')) return 3;
   // A curated entity page beats an auto-extracted stub with the same title;
   // otherwise the recency tie-break decides, and every search touches the stub.
