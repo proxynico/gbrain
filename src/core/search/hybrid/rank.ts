@@ -6,7 +6,7 @@
 import type { ModalityMode } from '../query-intent.ts';
 import { type AdaptiveReturnDecision, adaptiveReturnFromConfig, applyAdaptiveReturn, resolveAdaptiveReturn } from '../return-policy.ts';
 import { type AutocutDecision, applyAutocut } from '../autocut.ts';
-import { type ExactLookupOpts, applyExactLookupTier } from '../exact-lookup.ts';
+import { type ExactLookupOpts, applyExactLookupTier, isSlugShapedQuery } from '../exact-lookup.ts';
 import { type FusionListEntry, type VectorArm, composeFusionLists } from '../fusion-lists.ts';
 import { type HybridRequest, applyIdentityBoosts, emitHybridMeta } from './request.ts';
 import type { KeywordArmConfidenceDecision } from '../arm-confidence.ts';
@@ -300,7 +300,18 @@ export async function rerankAndPin(
     : deduped;
   if (s1 && rerankerOpts.enabled) recordRerankReceipts(req.decide, query, reranked.slice(0, rerankerOpts.topNIn).filter((r) => s1Failure !== undefined || r.rerank_score !== undefined), s1Meta, s1Failure);
   if (s1Shadow) await s1Shadow(reranked);
-  const ordered = await applyFeedbackStage(engine, reranked, { reranked: reranked !== deduped });
+  let ordered = await applyFeedbackStage(engine, reranked, { reranked: reranked !== deduped });
+  // A reranker scores relevance, not whether an exact-title owner is current.
+  // Keep historical title collisions behind their current owner. Explicit
+  // historical queries and slug lookups retain the original relevance order.
+  if (effectiveModality !== 'image' && !isSlugShapedQuery(query)
+    && !/\b(?:history|historical|archive|archived|previous|superseded|retired|v\d+)\b/i.test(query)) {
+    const historical = (r: SearchResult) => /(?:^|\/)archive(?:\/|$)/.test(r.slug)
+      || /archived|superseded|retired/i.test(String(r.status ?? ''));
+    const currentTitles = new Set(ordered.filter(r => r.title && !historical(r)).map(r => (r.title ?? '').trim().toLowerCase()));
+    const collision = (r: SearchResult) => historical(r) && currentTitles.has((r.title ?? '').trim().toLowerCase());
+    ordered = [...ordered.filter(r => !collision(r)), ...ordered.filter(collision)];
+  }
 
   // Ranker wave (R1 receipt) — relational-arm rows bypass reranker DEMOTION:
   // re-pinned above the reranked text rows in fused order, bounded by

@@ -12,6 +12,7 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## Unreleased
 
+- Search keeps a historical title collision behind its current owner after reranking. Explicit historical queries and slug lookups keep their relevance ordering.
 - Entity and context-pack name lookups prefer a current exact-title page over an archived or superseded page, even when the current owner is a note. Explicit historical slug lookups remain available.
 
 ## [0.60.144.0] - 2026-10-10
