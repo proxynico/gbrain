@@ -14,7 +14,7 @@
  */
 import type { BrainEngine } from '../engine.ts';
 import type { DomainBankSampleOpts, CorpusSampleOpts, DomainBankRow } from '../types.ts';
-import type { Page, PageInput, PageFilters, StalePageRow } from '../types.ts';
+import type { Page, PageInput, PageFilters, PageFrontmatterFilter, StalePageRow } from '../types.ts';
 import type { GetVersionsOpts, PageVersionRows } from '../page-state/version-types.ts';
 import { PAGE_SORT_SQL } from '../types.ts';
 import type { PageWriteOptions } from '../page-state/types.ts';
@@ -368,6 +368,27 @@ export async function updatePageContextualRetrievalState(
     `);
   }
 
+/** Every validated frontmatter clause must hold on the page's top-level string field. */
+function frontmatterListPagePredicate(filters: readonly PageFrontmatterFilter[] | undefined) {
+  if (!filters?.length) return sqlFragment``;
+  return sqlFragment`AND NOT EXISTS (
+    SELECT 1
+    FROM jsonb_array_elements(${JSON.stringify(filters)}::text::jsonb) AS fm_clause(value)
+    WHERE
+      jsonb_typeof(p.frontmatter -> (fm_clause.value ->> 'field')) IS DISTINCT FROM 'string'
+      OR CASE fm_clause.value ->> 'operator'
+        WHEN 'eq_ci' THEN
+          lower(p.frontmatter ->> (fm_clause.value ->> 'field')) <> lower(fm_clause.value ->> 'value')
+        WHEN 'contains_any_ci' THEN NOT EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements_text(fm_clause.value -> 'values') AS needle(value)
+          WHERE strpos(lower(p.frontmatter ->> (fm_clause.value ->> 'field')), lower(needle.value)) > 0
+        )
+        ELSE TRUE
+      END
+  )`;
+}
+
 export async function listPages(exec: ScopedRead, filters?: PageFilters): Promise<Page[]> {
     const limit = filters?.limit || 100;
     const offset = filters?.offset || 0;
@@ -404,6 +425,7 @@ export async function listPages(exec: ScopedRead, filters?: PageFilters): Promis
       : filters?.sourceId
         ? sqlFragment`AND p.source_id = ${filters.sourceId}`
         : sqlFragment``;
+    const frontmatterCondition = frontmatterListPagePredicate(filters?.frontmatterFilters);
     // v0.26.5: hide soft-deleted by default; opt in via filters.includeDeleted.
     const deletedCondition = filters?.includeDeleted === true
       ? sqlFragment``
@@ -430,7 +452,7 @@ export async function listPages(exec: ScopedRead, filters?: PageFilters): Promis
       const { rows } = await exec.run(sqlFragment`
         SELECT ${columns}, to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at_iso FROM pages p
         ${tagJoin}
-        WHERE 1=1 ${typeCondition} ${tagCondition} ${updatedCondition} ${slugCondition} ${sourceCondition} ${deletedCondition} ${privateCondition} ${effectiveAfterCondition} ${effectiveBeforeCondition}
+        WHERE 1=1 ${typeCondition} ${tagCondition} ${updatedCondition} ${slugCondition} ${sourceCondition} ${frontmatterCondition} ${deletedCondition} ${privateCondition} ${effectiveAfterCondition} ${effectiveBeforeCondition}
         ORDER BY ${orderBy} LIMIT ${limit} OFFSET ${offset}
       `);
       return rows.map(rowToPage);

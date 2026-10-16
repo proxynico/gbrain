@@ -423,6 +423,25 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
         "type": "number",
         "description": "Rows to skip."
       },
+      "slug_prefix": {
+        "type": "string",
+        "description": "Literal slug prefix."
+      },
+      "frontmatter_filters": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "description": "{field, operator:\"eq_ci\", value} or {field, operator:\"contains_any_ci\", values}."
+        },
+        "description": "Up to 8 AND clauses on top-level frontmatter strings."
+      },
+      "frontmatter_fields": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Up to 16 frontmatter fields to include per row."
+      },
       "updated_after": {
         "type": "string",
         "description": "Only pages updated after this ISO time."

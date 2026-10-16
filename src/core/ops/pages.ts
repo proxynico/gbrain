@@ -27,6 +27,7 @@ import { bumpLastRetrievedAt } from '../last-retrieved.ts';
 import { resolveExcludePrivatePages, isPrivatePage, findPrivateOnlySlugs } from '../search/private-visibility.ts';
 import { LIST_PAGES_DESCRIPTION, CAPTURE_DESCRIPTION } from '../operations-descriptions.ts';
 import { listPagesPagination, listingTruncatedNotice } from './list-pages-pagination.ts';
+import { PageListFilterError, parseListPagesEnumeration, projectPageFrontmatter } from '../page-list-filters.ts';
 import { OperationError, opError, type Operation, type OperationContext } from './contract.ts';
 import { invalidParam, readFix } from './op-fix.ts';
 import { isDatetimeInputError } from '../utils.ts';
@@ -471,6 +472,9 @@ const list_pages: Operation = {
     offset: {
       type: 'number', description: 'Rows to skip.',
     },
+    slug_prefix: { type: 'string', description: 'Literal slug prefix.' },
+    frontmatter_filters: { type: 'array', items: { type: 'object', description: '{field, operator:"eq_ci", value} or {field, operator:"contains_any_ci", values}.' }, description: 'Up to 8 AND clauses on top-level frontmatter strings.' },
+    frontmatter_fields: { type: 'array', items: { type: 'string' }, description: 'Up to 16 frontmatter fields to include per row.' },
     // v0.29 — surface filter that already exists on PageFilters.
     updated_after: {
       type: 'string',
@@ -527,6 +531,13 @@ const list_pages: Operation = {
     // them silently return [] or, for the CLI's `--source-id ""`, widen to
     // every source.
     const sourceIdParam = parseSourceIdParam(p.source_id, 'list_pages', { allowAll: true });
+    const { slugPrefix, frontmatterFilters, projectedFields } = (() => {
+      try { return parseListPagesEnumeration(p); } catch (error: unknown) {
+        if (!(error instanceof PageListFilterError)) throw error;
+        const param = error.param ?? 'frontmatter_filters';
+        throw invalidParam(ctx, 'list_pages', param, `list_pages: ${error.message}`, { def: list_pages.params[param] });
+      }
+    })();
     const scope = federatedSearchScope(ctx, sourceIdParam);
     // #4620: an explicit source_id must name a live source (after the grant check).
     await assertExplicitSourceLive(ctx, sourceIdParam);
@@ -572,12 +583,15 @@ const list_pages: Operation = {
       tag: p.tag as string,
       limit: limit + 1,
       offset,
+      slugPrefix,
+      frontmatterFilters,
       includeDeleted: (p.include_deleted as boolean) === true,
       updated_after: updatedAfterKeyset ? undefined : updatedAfter,
       updatedAfterKeyset,
       sort,
       excludePrivate,
-      listColumnsOnly: true,
+      // Projected fields need the frontmatter column the listing projection blanks.
+      listColumnsOnly: projectedFields.length === 0,
       ...scope,
     }).catch((e: unknown) => {
       // #6103: an updated_after the database cannot parse is the caller's input, not a server fault.
@@ -620,6 +634,9 @@ const list_pages: Operation = {
       updated_at: pg.updated_at,
       updated_at_iso: pg.updated_at_iso,
       ...(pg.deleted_at ? { deleted_at: pg.deleted_at } : {}),
+      ...(projectedFields.length > 0
+        ? { frontmatter: projectPageFrontmatter(pg.frontmatter, projectedFields) }
+        : {}),
     }));
   },
   scope: 'read', mutating: false,
