@@ -12,6 +12,8 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## Unreleased
 
+- Scoped frontmatter reindex accepts literal slug prefixes on PostgreSQL, including percent, underscore and backslash characters.
+
 - Migration heartbeats continue during unfenced work. Filtered listings retain their selection on continuation, private slug collisions cannot suppress readable references, and an unseen vault section in a partial card is reported as unknown.
 
 - Weekly content dates use validated period ends and ISO-week Sundays before import timestamps. Entity cards include the visible vault Open Threads separately from native commitments, with citations and truthful seven-item counts.

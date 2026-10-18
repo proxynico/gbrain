@@ -179,7 +179,7 @@ export async function backfillEffectiveDate(
     let slugFilter = '';
     if (slugPrefix) {
       params.push(slugPrefix + '%');
-      slugFilter += ` AND slug LIKE $${params.length} ESCAPE '\\\\'`;
+      slugFilter += ` AND slug LIKE $${params.length} ESCAPE E'\\\\'`;
     }
     if (opts.sourceId) {
       params.push(opts.sourceId);

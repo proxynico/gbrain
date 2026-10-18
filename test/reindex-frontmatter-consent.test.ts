@@ -104,3 +104,28 @@ test('the approval binds the previewed rows: a changed row re-asks; a newly matc
   expect(r.updated).toBe(0);
   expect((await dates())['other:notes/b']).toBe('2020-01-01');
 });
+
+
+test('source-and-prefix preview/apply use real SQL and match literal percent, underscore and backslash', async () => {
+  const cases = [
+    ['sources/example/weeks/', 'sources/example/other/'],
+    ['notes/literal%_/', 'notes/literalXXa/'],
+    [String.raw`notes/slash\part/`, 'notes/slashpart/'],
+  ];
+  for (const [prefix, near] of cases) {
+    const slug = `${prefix}item`;
+    for (const sourceId of ['default', 'other']) {
+      await engine.executeRaw("INSERT INTO pages (source_id, slug, type, title, compiled_truth, frontmatter) VALUES ($1, $2, 'note', 'Example weekly', 'Synthetic summary.', $3::jsonb)", [sourceId, slug, JSON.stringify({ date: '2004-05-06' })]);
+    }
+    await engine.putPage(`${near}item`, { type: 'note', title: 'Different prefix', compiled_truth: 'Synthetic summary.', frontmatter: { date: '2001-02-03' } }, { sourceId: 'other' });
+    await engine.executeRaw("UPDATE pages SET effective_date = '2020-01-01', effective_date_source = 'fallback' WHERE slug = ANY($1::text[])", [[slug, `${near}item`]]);
+    const before = await dates();
+    const scope = { sourceId: 'other', slugPrefix: prefix };
+    const preview = await quiet(() => runReindexFrontmatter(engine, { ...scope, dryRun: true, json: true }));
+    expect(preview.value).toMatchObject({ status: 'dry_run', examined: 1, updated: 1, source_filter: 'other' });
+    expect(await dates()).toEqual(before);
+    const applied = await quiet(() => runReindexFrontmatter(engine, { ...scope, yes: true, expect: preview.value.plan_hash, json: true }));
+    expect(applied.value).toMatchObject({ status: 'ok', examined: 1, updated: 1 });
+    expect(await dates()).toEqual({ ...before, [`other:${slug}`]: '2004-05-06' });
+  }
+});
