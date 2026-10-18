@@ -223,3 +223,25 @@ describe('computeEffectiveDate: explicit historical dates (#5742)', () => {
     expect(r.source).toBe('filename');
   });
 });
+
+
+describe('weekly content dates', () => {
+  test('period end beats import creation and a conflicting week label', () => {
+    const r = run({ fm: { period: '2026-01-05 to 2026-01-11', week: '2026-W01', created: '2026-10-15' } });
+    expect(r.source).toBe('period');
+    expect(r.date?.toISOString()).toBe('2026-01-11T00:00:00.000Z');
+  });
+  test('ISO week ends on Sunday across year boundaries', () => {
+    expect(run({ fm: { week: '2020-W53' } }).date?.toISOString()).toBe('2021-01-03T00:00:00.000Z');
+    expect(run({ fm: { week: '2026-W01' } }).source).toBe('week');
+  });
+  test('explicit dates and filename retain precedence', () => {
+    expect(run({ fm: { date: '2025-01-01', week: '2026-W01' } }).source).toBe('date');
+    expect(run({ filename: '2025-01-02-note', fm: { period: '2026-01-01 to 2026-01-07' } }).source).toBe('filename');
+  });
+  test('invalid ranges, calendar days and ISO weeks fall through', () => {
+    for (const fm of [{ period: '2026-01-11 to 2026-01-05' }, { period: '2026-02-30 to 2026-03-02' }, { week: '2021-W53' }, { week: '2026-W00' }, { week: '2026-W54' }]) {
+      expect(run({ fm }).source).toBe('fallback');
+    }
+  });
+});

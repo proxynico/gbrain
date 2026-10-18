@@ -1086,6 +1086,12 @@ describe('deriveTimelineAnchor', () => {
     })).toBeNull();
   });
 
+  test('weekly periods do not become single synthetic timeline events', () => {
+    for (const source of ['period', 'week'] as const) {
+      expect(deriveTimelineAnchor({ slug: 'weeks/2026-W01', effectiveDate: '2026-01-04', effectiveDateSource: source })).toBeNull();
+    }
+  });
+
   test('returns null when no date or no source', () => {
     expect(deriveTimelineAnchor({ slug: 'a', effectiveDate: null, effectiveDateSource: 'date' })).toBeNull();
     expect(deriveTimelineAnchor({ slug: 'a', effectiveDate: new Date('2026-01-01Z'), effectiveDateSource: null })).toBeNull();

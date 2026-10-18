@@ -2251,7 +2251,7 @@ export function deriveTimelineAnchor(input: TimelineAnchorInput): TimelineCandid
   if (!effectiveDate) return null;
   // 'fallback' === updated_at; the rest ('event_date'|'date'|'published'|'filename')
   // are real content dates. null/undefined source is not trustworthy either.
-  if (effectiveDateSource == null || effectiveDateSource === 'fallback') return null;
+  if (effectiveDateSource == null || effectiveDateSource === 'fallback' || effectiveDateSource === 'period' || effectiveDateSource === 'week') return null;
   const dt = typeof effectiveDate === 'string' ? new Date(effectiveDate) : effectiveDate;
   if (!(dt instanceof Date) || Number.isNaN(dt.getTime())) return null;
   const iso = dt.toISOString().slice(0, 10);

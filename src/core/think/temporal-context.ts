@@ -32,7 +32,7 @@ export class ReferenceDateError extends Error {
 }
 
 /** Effective-date sources that describe the content rather than the row. */
-const CONTENT_DATE_SOURCES = new Set(['event_date', 'date', 'published', 'filename']);
+const CONTENT_DATE_SOURCES = new Set(['event_date', 'date', 'published', 'filename', 'period', 'week']);
 
 const ISO_DAY = /^(\d{4})-(\d{2})-(\d{2})$/;
 

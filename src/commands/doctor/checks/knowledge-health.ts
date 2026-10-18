@@ -338,7 +338,7 @@ async function runEffectiveDate(ctx: DoctorContext): Promise<Check[]> {
        UNION ALL
        SELECT 'pre_1990', COUNT(*)::text FROM sample
         WHERE effective_date IS NOT NULL AND effective_date < TIMESTAMPTZ '1990-01-01'
-          AND COALESCE(effective_date_source, '') NOT IN ('event_date', 'date', 'published', 'created')`,
+          AND COALESCE(effective_date_source, '') NOT IN ('event_date', 'date', 'published', 'period', 'week', 'created')`,
     );
     const counts = new Map(result.map(r => [r.kind, Number(r.count)]));
     const future = counts.get('future_dated') ?? 0;
@@ -374,7 +374,7 @@ async function runEffectiveDate(ctx: DoctorContext): Promise<Check[]> {
        SELECT slug, frontmatter, created_at, updated_at
          FROM sample
         WHERE effective_date_source = 'fallback'
-          AND (frontmatter ? 'event_date' OR frontmatter ? 'date' OR frontmatter ? 'published')`,
+          AND (frontmatter ? 'event_date' OR frontmatter ? 'date' OR frontmatter ? 'published' OR frontmatter ? 'period' OR frontmatter ? 'week')`,
     );
     let fallbackWithFm = 0;
     for (const row of candidates) {
@@ -396,7 +396,7 @@ async function runEffectiveDate(ctx: DoctorContext): Promise<Check[]> {
         updatedAt: new Date(row.updated_at),
         createdAt: new Date(row.created_at),
       });
-      if (recomputed.source === 'event_date' || recomputed.source === 'date' || recomputed.source === 'published') {
+      if (recomputed.source === 'event_date' || recomputed.source === 'date' || recomputed.source === 'published' || recomputed.source === 'period' || recomputed.source === 'week') {
         fallbackWithFm++;
       }
     }

@@ -196,6 +196,8 @@ export type EffectiveDateSource =
   | 'date'
   | 'published'
   | 'filename'
+  | 'period'
+  | 'week'
   | 'created'
   | 'fallback';
 

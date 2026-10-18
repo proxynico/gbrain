@@ -10,9 +10,10 @@
  *   2. frontmatter.date          — dated essays
  *   3. frontmatter.published     — writing/
  *   4. filename-date             — leading YYYY-MM-DD in basename
- *   5. frontmatter created keys  — created / created_at / date_created
- *   6. created_at                — fallback: the stable creation anchor
- *   7. updated_at                — last resort
+ *   5. frontmatter period / week — period end / ISO week Sunday
+ *   6. frontmatter created keys  — created / created_at / date_created
+ *   7. created_at                — fallback: the stable creation anchor
+ *   8. updated_at                — last resort
  *
  * Per-prefix override: for `daily/` and `meetings/` slug prefixes, the
  * filename-date jumps to position 1 — the filename is the user's primary
@@ -225,6 +226,29 @@ function validateExplicit(value: unknown, timeZone?: string): Date | null {
   return d;
 }
 
+function periodEnd(value: unknown): Date | null {
+  if (typeof value !== 'string') return null;
+  const match = /^(\d{4}-\d{2}-\d{2})\s+to\s+(\d{4}-\d{2}-\d{2})$/.exec(value.trim());
+  if (!match) return null;
+  const start = validateExplicit(match[1]);
+  const end = validateExplicit(match[2]);
+  return start && end && start <= end ? end : null;
+}
+
+function isoWeekEnd(value: unknown): Date | null {
+  if (typeof value !== 'string') return null;
+  const match = /^(\d{4})-W(\d{2})$/.exec(value.trim());
+  if (!match) return null;
+  const year = +match[1];
+  const week = +match[2];
+  if (year < 1 || week < 1 || week > 53) return null;
+  const jan4 = utcCalendarDate(year, 1, 4)!;
+  const monday = jan4.getTime() - ((jan4.getUTCDay() + 6) % 7) * 86_400_000;
+  const thursday = new Date(monday + ((week - 1) * 7 + 3) * 86_400_000);
+  if (thursday.getUTCFullYear() !== year) return null;
+  return validateExplicit(new Date(monday + ((week - 1) * 7 + 6) * 86_400_000));
+}
+
 function extractFilenameDate(filename: string | null | undefined): Date | null {
   if (!filename) return null;
   const m = filename.match(FILENAME_DATE_RE);
@@ -263,6 +287,8 @@ export function computeEffectiveDate(opts: ComputeEffectiveDateOpts): EffectiveD
         { date: fmEvent, source: 'event_date' },
         { date: fmDate, source: 'date' },
         { date: fmPublished, source: 'published' },
+        { date: periodEnd(frontmatter.period), source: 'period' },
+        { date: isoWeekEnd(frontmatter.week), source: 'week' },
         { date: fmCreated, source: 'created' },
       ]
     : [
@@ -270,6 +296,8 @@ export function computeEffectiveDate(opts: ComputeEffectiveDateOpts): EffectiveD
         { date: fmDate, source: 'date' },
         { date: fmPublished, source: 'published' },
         { date: filenameDate, source: 'filename' },
+        { date: periodEnd(frontmatter.period), source: 'period' },
+        { date: isoWeekEnd(frontmatter.week), source: 'week' },
         { date: fmCreated, source: 'created' },
       ];
 
