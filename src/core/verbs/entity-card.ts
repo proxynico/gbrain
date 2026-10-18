@@ -39,9 +39,14 @@ import { loadLinkableTypes } from '../mentions/policy.ts';
 import { readMentionCoverage, type MentionCoverage } from '../mentions/coverage.ts';
 import { encodeCursor, readReferrerGroups, PAGE_DEFAULT_LIMIT, type ReferenceRow } from '../mentions/referrers.ts';
 import { ALL_SOURCES } from '../source-id.ts';
+import { redactFindings } from '../secret-scan.ts';
+import { sanitizeRemoteBody } from '../remote-body.ts';
+import { stripTakesFence } from '../takes-fence.ts';
+import { stripFactsFence } from '../facts-fence.ts';
 
 const EDGE_CAP = 10;
 const OPEN_THREADS_CAP = 3;
+const VAULT_THREADS_CAP = 7;
 const OPEN_THREAD_TIMELINE_WINDOW_DAYS = 90;
 const SUGGESTION_CAP = 3;
 const FACT_FETCH_CAP = 100;
@@ -77,6 +82,14 @@ export interface EntityOpenThread {
   origin?: string;
 }
 
+interface EntityVaultThreads {
+  page: { source_id: string; slug: string };
+  items: Array<{ text: string; date: string | null; standing: boolean; citations: string[] }>;
+  total: number;
+  omitted: number;
+  full_page_required: true;
+}
+
 export interface EntityCard {
   /** source_id: the source that owns the page (a federated lookup can resolve outside the caller's default). */
   entity: { slug: string; title: string; type: string | null; source_id?: string };
@@ -91,6 +104,8 @@ export interface EntityCard {
   };
   /** Best-effort in v1: active commitment-kind facts + recent timeline entries. */
   open_threads: EntityOpenThread[];
+  /** Cited unresolved issues from the resolved vault page, separate from native loops. */
+  vault_threads?: EntityVaultThreads;
   /** Top typed edges, mentions excluded, out-edges first. */
   edges: EntityCardEdge[];
   backlink_count: number;
@@ -609,11 +624,48 @@ async function assembleCard(
       last_timeline_date: timeline.length ? toIso(timeline[0].date) : null,
     },
     open_threads: openThreads,
+    ...vaultThreads(row, sourceId, remote),
     edges,
     backlink_count: backlinkCount,
     active_fact_count: activeFactCount ?? facts.length,
     ...(relationshipNote ? { relationship_note: relationshipNote } : {}),
   };
+}
+
+function vaultThreads(row: CardPageRow, sourceId: string, remote: boolean): Pick<EntityCard, 'vault_threads'> {
+  const body = row.compiled_truth ?? '';
+  const visible = remote ? sanitizeRemoteBody(body) : stripFactsFence(stripTakesFence(body), { keepVisibility: ['private', 'world'] });
+  const section = /^## Open Threads[ \t]*(?:\r?\n|$)([\s\S]*?)(?=^#{1,2}[ \t]|(?![\s\S]))/m.exec(redactFindings(visible, { highEntropy: true }).text);
+  if (!section) return {};
+  const items: EntityVaultThreads['items'] = [];
+  let text: string | null = null;
+  const append = () => {
+    if (!text) return;
+    const title = /^\*\*([^*]+)\*\*/.exec(text)?.[1] ?? '';
+    items.push({
+      text,
+      date: /\((\d{4}-\d{2}-\d{2})\)/.exec(title)?.[1] ?? null,
+      standing: text.includes('[standing]'),
+      citations: [...text.matchAll(/\[Source:\s*((?:\[\[[^\]]*\]\]|[^\]])*)\]/g)].map(match => match[0]),
+    });
+  };
+  for (const line of section[1].split('\n')) {
+    const bullet = /^[-*]\s+(.+)$/.exec(line);
+    if (bullet) {
+      append();
+      text = bullet[1];
+    } else if (text && line.trim()) {
+      text += `\n${line}`;
+    }
+  }
+  append();
+  return { vault_threads: {
+    page: { source_id: sourceId, slug: row.slug },
+    items: items.slice(0, VAULT_THREADS_CAP),
+    total: items.length,
+    omitted: Math.max(0, items.length - VAULT_THREADS_CAP),
+    full_page_required: true,
+  } };
 }
 
 /**

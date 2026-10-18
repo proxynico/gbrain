@@ -214,3 +214,46 @@ describe('entity card open-loop-backed open_threads', () => {
     }
   });
 });
+
+
+describe('canonical vault Open Threads', () => {
+  const thread = (i: number) => `- **Issue ${i} (2026-01-0${i})** ${i === 1 ? '[standing] ' : ''}— Detail. [Source: [[2026-W01]]]`;
+  async function vault(body: string, frontmatter: Record<string, unknown> = {}) {
+    await engine.putPage('people/alice-example', { title: 'Alice', type: 'person', compiled_truth: body, frontmatter }, { sourceId: 'g1' });
+  }
+  test('seven cited issues retain title date, standing marker and source-qualified pointer', async () => {
+    await vault(`## Open Threads\n${Array.from({ length: 7 }, (_, i) => thread(i + 1)).join('\n')}\n## Timeline\n- unrelated event`);
+    const c = await card();
+    expect(c.vault_threads?.total).toBe(7);
+    expect(c.vault_threads?.omitted).toBe(0);
+    expect(c.vault_threads?.page).toEqual({ source_id: 'g1', slug: 'people/alice-example' });
+    expect(c.vault_threads?.items[0]).toEqual({ text: thread(1).slice(2), date: '2026-01-01', standing: true, citations: ['[Source: [[2026-W01]]]'] });
+    expect(c.vault_threads?.full_page_required).toBe(true);
+    expect(c.open_threads.length).toBeLessThanOrEqual(3);
+  });
+  test('cap reports omitted items; empty section does not invent a recent event', async () => {
+    await vault(`## Open Threads\n${Array.from({ length: 8 }, (_, i) => thread(i + 1)).join('\n')}`);
+    expect((await card()).vault_threads).toMatchObject({ total: 8, omitted: 1, items: expect.any(Array) });
+    expect((await card()).vault_threads?.items).toHaveLength(7);
+    await vault('## Open Threads\n\n## Timeline\n- A recent event');
+    expect((await card()).vault_threads).toMatchObject({ items: [], total: 0, omitted: 0 });
+  });
+  test('aliases use the current owner and explicit historical slugs keep their own section', async () => {
+    await vault(`## Open Threads\n${thread(1)}`);
+    await engine.setPageAliases('people/alice-example', 'g1', ['example founder']);
+    await engine.putPage('archive/alice-example', { title: 'Alice', type: 'person', compiled_truth: `## Open Threads\n${thread(2)}`, frontmatter: { status: 'archived' } }, { sourceId: 'g1' });
+    expect((await card('example founder')).vault_threads?.items[0].date).toBe('2026-01-01');
+    expect((await card('Alice')).vault_threads?.page.slug).toBe('people/alice-example');
+    expect((await card('archive/alice-example')).vault_threads?.items[0].date).toBe('2026-01-02');
+  });
+  test('remote page and fence visibility apply before thread counting', async () => {
+    await vault(`## Open Threads\n${thread(1)}\n<!--- gbrain:takes:begin -->\n${thread(2)}\n<!--- gbrain:takes:end -->`);
+    const remote = await buildEntityCard(engine, 'g1', 'Alice', { remote: true });
+    expect(remote.card?.vault_threads?.total).toBe(1);
+    expect(JSON.stringify(remote.card?.vault_threads)).not.toContain('Issue 2');
+    await vault(`## Open Threads\n${thread(1)}`, { visibility: 'private' });
+    const hidden = await buildEntityCard(engine, 'g1', 'Alice', { remote: true });
+    expect(hidden.found).toBe(false);
+    expect(hidden.card).toBeUndefined();
+  });
+});

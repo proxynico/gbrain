@@ -610,6 +610,22 @@ export const RESPONSE_SCHEMAS: Record<VerbName, Record<string, unknown>> = {
               },
             },
           },
+          vault_threads: {
+            type: 'object',
+            required: ['page', 'items', 'total', 'omitted', 'full_page_required'],
+            properties: {
+              page: { type: 'object', required: ['source_id', 'slug'], properties: {
+                source_id: { type: 'string' }, slug: { type: 'string' },
+              } },
+              items: { type: 'array', maxItems: 7, items: {
+                type: 'object', required: ['text', 'date', 'standing', 'citations'], properties: {
+                  text: { type: 'string' }, date: { type: ['string', 'null'] }, standing: { type: 'boolean' },
+                  citations: { type: 'array', items: { type: 'string' } },
+                },
+              } },
+              total: { type: 'integer' }, omitted: { type: 'integer' }, full_page_required: { type: 'boolean', const: true },
+            },
+          },
           edges: {
             type: 'array',
             items: {
