@@ -9,6 +9,7 @@
  */
 import { describe, expect, test, beforeAll, afterAll, beforeEach } from 'bun:test';
 
+import { formatResult } from '../src/cli/main.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { buildEntityCard, type EntityCard } from '../src/core/verbs/entity-card.ts';
@@ -231,12 +232,35 @@ describe('canonical vault Open Threads', () => {
     expect(c.vault_threads?.full_page_required).toBe(true);
     expect(c.open_threads.length).toBeLessThanOrEqual(3);
   });
+  test('the default CLI prints vault issues, counts, citations and the full-page instruction', async () => {
+    await vault(`## Open Threads\n${Array.from({ length: 8 }, (_, i) => thread(i + 1)).join('\n')}`);
+    const c = await card();
+    const output = formatResult('entity', { found: true, latency_ms: 0, card: c });
+    expect(output).toContain('vault open threads: 8 total, 1 omitted (g1:people/alice-example)');
+    expect(output).toContain(thread(1).slice(2));
+    expect(output).toContain(thread(7).slice(2));
+    expect(output).not.toContain('Issue 8');
+    expect(output).toContain('Read the full page g1:people/alice-example for a complete brief.');
+    const unavailable = formatResult('entity', { found: true, latency_ms: 0, card: { ...c, vault_threads: undefined,
+      vault_threads_unavailable: { page: { source_id: 'g1', slug: 'people/alice-example' }, reason: 'section_exceeds_card_prefix', full_page_required: true } } });
+    expect(unavailable).toContain('vault open threads unavailable: section_exceeds_card_prefix (g1:people/alice-example)');
+    expect(unavailable).toContain('Read the full page g1:people/alice-example for a complete brief.');
+  });
   test('cap reports omitted items; empty section does not invent a recent event', async () => {
     await vault(`## Open Threads\n${Array.from({ length: 8 }, (_, i) => thread(i + 1)).join('\n')}`);
     expect((await card()).vault_threads).toMatchObject({ total: 8, omitted: 1, items: expect.any(Array) });
     expect((await card()).vault_threads?.items).toHaveLength(7);
     await vault('## Open Threads\n\n## Timeline\n- A recent event');
     expect((await card()).vault_threads).toMatchObject({ items: [], total: 0, omitted: 0 });
+  });
+  test('a bounded body prefix never claims a partial section has exact totals', async () => {
+    const longDetail = 'An unresolved issue still needs a decision. '.repeat(2000);
+    await vault(`## Open Threads\n${thread(1)}\n- **Long issue (2026-01-02)** — ${longDetail} [Source: [[2026-W01]]]\n## Timeline`);
+    const partial = await card();
+    expect(partial.vault_threads).toBeUndefined();
+    expect(partial.vault_threads_unavailable).toEqual({ page: { source_id: 'g1', slug: 'people/alice-example' }, reason: 'section_exceeds_card_prefix', full_page_required: true });
+    await vault(`## Open Threads\n${thread(1)}\n## Timeline\n${longDetail}`);
+    expect((await card()).vault_threads).toMatchObject({ total: 1, omitted: 0 });
   });
   test('aliases use the current owner and explicit historical slugs keep their own section', async () => {
     await vault(`## Open Threads\n${thread(1)}`);
