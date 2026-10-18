@@ -19,7 +19,6 @@ beforeEach(async () => {
   await resetPgliteState(engine);
 });
 
-/** Builds a minimal page fixture with caller-provided frontmatter. */
 function pageInput(frontmatter: Record<string, unknown> = {}): PageInput {
   return {
     type: 'note',
@@ -29,7 +28,6 @@ function pageInput(frontmatter: Record<string, unknown> = {}): PageInput {
   };
 }
 
-/** Stores a fixture in the requested source. */
 async function putFixture(
   slug: string,
   frontmatter: Record<string, unknown>,

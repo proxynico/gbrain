@@ -156,6 +156,30 @@ describe('entity card referenced_by', () => {
   });
 });
 
+describe('source-qualified card references with an unreadable slug collision', () => {
+  test('a hidden earlier source cannot suppress referrers or steal the continuation target', async () => {
+    await engine.executeRaw("INSERT INTO sources (id, name) VALUES ('a-private', 'a-private'), ('z-owner', 'z-owner') ON CONFLICT DO NOTHING");
+    await page(engine, 'people/shared', 'person', 'Canonical Example', 'Owner.', { sourceId: 'z-owner' });
+    await page(engine, 'people/shared', 'person', 'Hidden Example', 'Private.', { sourceId: 'a-private', frontmatter: { visibility: 'private' } });
+    const [target] = await engine.executeRaw<{ id: number }>("SELECT id FROM pages WHERE source_id = 'z-owner' AND slug = 'people/shared'");
+    for (let i = 0; i < 13; i++) {
+      const slug = `notes/ref-${String(i).padStart(2, '0')}`;
+      await page(engine, slug, 'note', slug, 'Readable evidence.');
+      await engine.executeRaw("INSERT INTO links(from_page_id,to_page_id,link_type,link_source) SELECT id,$1,'mentions','mentions' FROM pages WHERE source_id='default' AND slug=$2", [target.id, slug]);
+    }
+    const opts = { ...remote, sourceId: 'default', auth: { token: 'synthetic', clientId: 'test', scopes: ['read'], allowedSources: ['a-private', 'default', 'z-owner'] } };
+    const { json, result } = await call('entity', { name: 'Canonical Example' }, opts);
+    if (!json) throw new Error(JSON.stringify(result));
+    expect(json.card.referenced_by_count).toBe(13);
+    const group = json.card.referenced_by.find((g: { canonical_type: string }) => g.canonical_type === 'note');
+    expect(group.total).toBe(13);
+    const continuation = await call(group.next.tool, group.next.arguments, opts);
+    expect(continuation.json.total).toBe(13);
+    expect(continuation.json.rows).toHaveLength(3);
+    expect(new Set([...group.rows, ...continuation.json.rows].map((r: { slug: string }) => r.slug)).size).toBe(13);
+  });
+});
+
 describe('coverage states', () => {
   test('pending on a miss before any pass, with a notice whose fix the local CLI runs and a remote agent relays', async () => {
     await account();

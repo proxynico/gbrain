@@ -36,7 +36,7 @@
  *
  * Serial: temp GBRAIN_HOME + fake embed transport for the file's lifecycle.
  */
-import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll, spyOn } from 'bun:test';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, renameSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -54,6 +54,7 @@ import {
   GLOBAL_MIGRATION_LOCK_ID,
   persistEmbeddingFileConfig,
   planMigrationFlow,
+  executeMigrationFlow,
 } from '../src/commands/migrate-embeddings.ts';
 import {
   MIGRATION_STATE_KEY,
@@ -1096,4 +1097,52 @@ describe('empty-brain migration (plan pin 15)', () => {
       writeFileConfig('openai:text-embedding-3-small', TO_DIMS);
     }
   }, 120000);
+});
+
+
+test('the lease timer remains active during rowLock:false work and pauses for FOR SHARE', async () => {
+  const opts = { to: 'openai:text-embedding-3-small', dim: TO_DIMS, maxCostUsd: 1 };
+  const ctx = await planMigrationFlow(engine, opts);
+  for (const phase of ['unfenced', 'fenced'] as const) {
+    let heartbeat: (() => void) | undefined;
+    let refreshed = false;
+    let probed = false;
+    const interval = globalThis.setInterval;
+    const timer = spyOn(globalThis, 'setInterval').mockImplementation(new Proxy(interval, { apply(target, receiver, args: unknown[]) {
+      const [handler, ms, ...rest] = args;
+      if (ms === 15_000 && typeof handler === 'function') heartbeat = () => Reflect.apply(handler, undefined, rest);
+      return Reflect.apply(target, receiver, args);
+    } }));
+    const raw = engine.executeRaw.bind(engine);
+    const probe = async () => {
+      probed = true;
+      await raw("UPDATE gbrain_cycle_locks SET last_refreshed_at = '2000-01-01'::timestamptz");
+      if (!heartbeat) throw new Error('migration heartbeat was not installed');
+      heartbeat();
+      for (let attempt = 0; attempt < 20 && !refreshed; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+        const [row] = await raw<{ refreshed: boolean }>("SELECT bool_and(last_refreshed_at > '2001-01-01'::timestamptz) AS refreshed FROM gbrain_cycle_locks");
+        refreshed = row.refreshed;
+      }
+      throw new Error('lease timer probe complete');
+    };
+    const tx = new Proxy(engine, { get(target, key) {
+      if (key === 'executeRaw') return async (sql: string, params?: unknown[]) => {
+        if (sql.startsWith('LOCK TABLE sources')) return [];
+        if ((phase === 'unfenced' && sql.includes('AS pages,')) || (phase === 'fenced' && sql.includes('FROM gbrain_cycle_locks') && sql.includes('FOR SHARE'))) return probe();
+        return raw(sql, params);
+      };
+      const value = Reflect.get(target, key);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    const transaction = spyOn(engine, 'transaction').mockImplementation(async fn => fn(tx));
+    try {
+      expect(await executeMigrationFlow(engine, ctx, opts)).toMatchObject({ status: 'apply_failed' });
+      expect(probed).toBe(true);
+      expect(refreshed).toBe(phase === 'unfenced');
+    } finally {
+      transaction.mockRestore();
+      timer.mockRestore();
+    }
+  }
 });

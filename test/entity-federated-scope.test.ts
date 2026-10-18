@@ -1,14 +1,3 @@
-/**
- * #4275-adjacent — the `entity` verb resolves across federated sources.
- *
- * Pre-fix the verb pinned a single source:
- *   buildEntityCard(ctx.engine, ctx.sourceId ?? 'default', name, ...)
- * On a multi-source brain an unqualified lookup therefore searched only
- * 'default' and returned found:false for pages that get_page and search both
- * resolve — the verb disagreed with every other read surface. It now takes the
- * same visibility ladder (federatedSearchScope): grant array, explicit scalar,
- * else the trusted-local federated span.
- */
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
@@ -48,9 +37,6 @@ beforeEach(async () => {
     type: 'person', title: 'Ada Lovelace', compiled_truth: 'analyst',
     frontmatter: { type: 'person', aliases: ['LOVELACE Ada'] },
   }, { sourceId: 'alpha' });
-  // putPage does not project frontmatter aliases; the import pipeline calls
-  // setPageAliases. Set the row directly so this test exercises the lookup
-  // path it is about rather than the projection.
   await engine.setPageAliases('people/ada-lovelace', 'alpha', ['lovelace ada']);
 });
 

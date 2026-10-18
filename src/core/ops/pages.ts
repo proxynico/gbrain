@@ -623,7 +623,6 @@ const list_pages: Operation = {
       updatedAfterKeyset,
       sort,
       excludePrivate,
-      // Projected fields need the frontmatter column the listing projection blanks.
       listColumnsOnly: projectedFields.length === 0,
       ...scope,
     }).catch((e: unknown) => {

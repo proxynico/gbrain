@@ -7,7 +7,6 @@ import {
 } from '../src/core/operations.ts';
 import type { Page, PageFilters } from '../src/core/types.ts';
 
-/** Builds one complete page returned by the engine stub. */
 function fixturePage(overrides: Partial<Page> = {}): Page {
   return {
     id: 1,
@@ -28,7 +27,6 @@ function fixturePage(overrides: Partial<Page> = {}): Page {
   };
 }
 
-/** Creates an operation context that records every listPages filter. */
 function contextWith(
   pages: Page[],
   calls: Array<PageFilters | undefined>,
@@ -40,7 +38,6 @@ function contextWith(
       calls.push(filters);
       return pages;
     },
-    // Every named source is live: assertExplicitSourceLive's point lookup.
     executeRaw: async () => [{ ok: 1 }],
   } as unknown as BrainEngine;
   return {

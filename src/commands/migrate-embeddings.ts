@@ -620,8 +620,12 @@ export async function executeMigrationFlow(
     // FOR SHARE fences the lease rows until commit. An outside UPDATE would
     // wait on our own transaction and falsely report a lost lease on timeout.
     // The next foreground check outside the transaction resumes renewal.
-    transactionFenced = tx !== undefined;
-    if (tx) { fencedTransactions.add(tx); await assertMigrationLeases(tx, heldLocks, lease); }
+    const takesRowLock = tx !== undefined && lease?.rowLock !== false;
+    transactionFenced = tx !== undefined && (takesRowLock || fencedTransactions.has(tx));
+    if (tx) {
+      if (takesRowLock) fencedTransactions.add(tx);
+      await assertMigrationLeases(tx, heldLocks, lease);
+    }
     else for (const lock of heldLocks) {
       if (!await lock.refresh({ signal: AbortSignal.timeout(30_000) })) { lost = true; controller.abort(); throw new Error('Migration lock lease lost; further mutations refused.'); }
     }

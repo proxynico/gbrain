@@ -320,9 +320,6 @@ export async function rerankAndPin(
   if (s1 && rerankerOpts.enabled) recordRerankReceipts(req.decide, query, reranked.slice(0, rerankerOpts.topNIn).filter((r) => s1Failure !== undefined || r.rerank_score !== undefined), s1Meta, s1Failure);
   if (s1Shadow) await s1Shadow(reranked);
   let ordered = await applyFeedbackStage(engine, reranked, { reranked: reranked !== deduped });
-  // A reranker scores relevance, not whether an exact-title owner is current.
-  // Keep historical title collisions behind their current owner. Explicit
-  // historical queries and slug lookups retain the original relevance order.
   if (effectiveModality !== 'image' && !isSlugShapedQuery(query)
     && !/\b(?:history|historical|archive|archived|previous|superseded|retired|v\d+)\b/i.test(query)) {
     const historical = (r: SearchResult) => /(?:^|\/)archive(?:\/|$)/.test(r.slug)

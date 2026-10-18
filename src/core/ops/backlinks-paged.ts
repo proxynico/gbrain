@@ -10,6 +10,7 @@
  * continues it exactly.
  */
 
+import { privatePagesFilterFragment } from '../search/private-visibility.ts';
 import { opError, type OperationContext } from './contract.ts';
 import type { Link, PageReadPolicy } from '../types.ts';
 import type { Notice } from '../agent-output.ts';
@@ -50,19 +51,19 @@ async function scopeSources(ctx: OperationContext, policy: PageReadPolicy): Prom
 }
 
 /** The entity page's source: the first source in scope holding a live page with this slug. */
-async function targetSource(ctx: OperationContext, slug: string, sources: string[]): Promise<string | null> {
+async function targetSource(ctx: OperationContext, slug: string, sources: string[], excludePrivate: boolean): Promise<string | null> {
   const rows = await ctx.engine.executeRaw<{ source_id: string }>(
-    'SELECT source_id FROM pages WHERE slug = $1 AND source_id = ANY($2::text[]) AND deleted_at IS NULL', [slug, sources]);
+    `SELECT source_id FROM pages WHERE slug = $1 AND source_id = ANY($2::text[]) AND deleted_at IS NULL${excludePrivate ? ` AND ${privatePagesFilterFragment('pages')}` : ''}`, [slug, sources]);
   const found = new Set(rows.map(r => r.source_id));
   return sources.find(s => found.has(s)) ?? null;
 }
 
 async function referrerScope(ctx: OperationContext, slug: string, policy: PageReadPolicy): Promise<{ scope: ReferrerScope; sources: string[] } | null> {
   const sources = await scopeSources(ctx, policy);
-  const sourceId = await targetSource(ctx, slug, sources);
+  const excludePrivate = policy.excludePrivate === true;
+  const sourceId = await targetSource(ctx, slug, sources, excludePrivate);
   if (!sourceId) return null;
   const pack = await loadSourcePack(ctx.engine, sourceId);
-  const excludePrivate = policy.excludePrivate === true;
   return { sources, scope: { slug, sourceId, referrerSources: sources, excludePrivate, pack, keepVisibility: excludePrivate ? ['world'] : ['private', 'world'] } };
 }
 

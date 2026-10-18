@@ -709,7 +709,7 @@ export const RESPONSE_SCHEMAS: Record<VerbName, Record<string, unknown>> = {
           vault_threads_unavailable: {
             type: 'object', required: ['page', 'reason', 'full_page_required'], properties: {
               page: { type: 'object', required: ['source_id', 'slug'], properties: { source_id: { type: 'string' }, slug: { type: 'string' } } },
-              reason: { type: 'string', const: 'section_exceeds_card_prefix' }, full_page_required: { type: 'boolean', const: true },
+              reason: { type: 'string', enum: ['section_exceeds_card_prefix', 'section_presence_unknown'] }, full_page_required: { type: 'boolean', const: true },
             },
           },
           vault_threads: {

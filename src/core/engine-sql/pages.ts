@@ -418,7 +418,6 @@ export async function updatePageContextualRetrievalState(
     `);
   }
 
-/** Every validated frontmatter clause must hold on the page's top-level string field. */
 function frontmatterListPagePredicate(filters: readonly PageFrontmatterFilter[] | undefined) {
   if (!filters?.length) return sqlFragment``;
   return sqlFragment`AND NOT EXISTS (

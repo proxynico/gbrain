@@ -262,6 +262,15 @@ describe('canonical vault Open Threads', () => {
     await vault(`## Open Threads\n${thread(1)}\n## Timeline\n${longDetail}`);
     expect((await card()).vault_threads).toMatchObject({ total: 1, omitted: 0 });
   });
+  test('an unseen section beyond the card prefix has unknown presence, not zero threads', async () => {
+    await vault(`## State\n${'A long current state description. '.repeat(2400)}\n## Open Threads\n${thread(1)}`);
+    const c = await card();
+    expect(c.vault_threads).toBeUndefined();
+    expect(c.vault_threads_unavailable).toEqual({ page: { source_id: 'g1', slug: 'people/alice-example' }, reason: 'section_presence_unknown', full_page_required: true });
+    expect(formatResult('entity', { found: true, latency_ms: 0, card: c })).toContain('vault open threads unavailable: section_presence_unknown');
+    await vault('## State\nNo Open Threads heading in this complete small page.');
+    expect((await card()).vault_threads_unavailable).toBeUndefined();
+  });
   test('aliases use the current owner and explicit historical slugs keep their own section', async () => {
     await vault(`## Open Threads\n${thread(1)}`);
     await engine.setPageAliases('people/alice-example', 'g1', ['example founder']);

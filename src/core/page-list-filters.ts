@@ -16,12 +16,10 @@ export class PageListFilterError extends Error {
   }
 }
 
-/** Narrows an unknown filter clause to a dense plain object. */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/** Validates one top-level frontmatter field name. */
 function parseField(value: unknown): string {
   if (typeof value !== 'string' || !FIELD_RE.test(value)) {
     throw new PageListFilterError(
@@ -31,7 +29,6 @@ function parseField(value: unknown): string {
   return value;
 }
 
-/** Validates one string used by a frontmatter predicate. */
 function parseValue(value: unknown): string {
   if (
     typeof value !== 'string'

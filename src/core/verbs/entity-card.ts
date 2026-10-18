@@ -118,7 +118,7 @@ export interface EntityCard {
   open_threads: EntityOpenThread[];
   /** Cited unresolved issues from the resolved vault page, separate from native loops. */
   vault_threads?: EntityVaultThreads;
-  vault_threads_unavailable?: { page: { source_id: string; slug: string }; reason: 'section_exceeds_card_prefix'; full_page_required: true };
+  vault_threads_unavailable?: { page: { source_id: string; slug: string }; reason: 'section_exceeds_card_prefix' | 'section_presence_unknown'; full_page_required: true };
   /** Top typed edges, mentions excluded, out-edges first. */
   edges: EntityCardEdge[];
   backlink_count: number;
@@ -498,8 +498,9 @@ async function cardReferences(engine: BrainEngine, sources: string[], sourceId: 
   entityTypes: ReadonlySet<string>): Promise<Pick<EntityCard, 'referenced_by_count' | 'referenced_by' | 'coverage' | 'references_unavailable'>> {
   try {
     const { pack } = await loadLinkableTypes(engine, sourceId);
+    const { privatePagesFilterFragment } = await import('../search/private-visibility.ts');
     const [{ n }] = await engine.executeRaw<{ n: number }>(
-      'SELECT count(*)::int AS n FROM pages WHERE slug = $1 AND source_id = ANY($2::text[]) AND deleted_at IS NULL', [row.slug, sources]);
+      `SELECT count(*)::int AS n FROM pages WHERE slug = $1 AND source_id = ANY($2::text[]) AND deleted_at IS NULL${excludePrivate ? ` AND ${privatePagesFilterFragment('pages')}` : ''}`, [row.slug, sources]);
     const referrerSources = n === 1 ? sources : [sourceId];
     const { total, groups } = await readReferrerGroups(engine, { slug: row.slug, sourceId, referrerSources, excludePrivate, pack,
       keepVisibility: opts.remote ? ['world'] : ['private', 'world'], eligibility: opts.eligibility });
@@ -769,7 +770,7 @@ function vaultThreads(row: CardPageRow, sourceId: string, remote: boolean): Pick
   const visible = remote ? sanitizeRemoteBody(body) : stripFactsFence(stripTakesFence(body), { keepVisibility: ['private', 'world'] });
   const clean = redactFindings(visible, { highEntropy: true }).text;
   const section = /^## Open Threads[ \t]*(?:\r?\n|$)([\s\S]*?)(?=^#{1,2}[ \t]|(?![\s\S]))/m.exec(clean);
-  if (!section) return {};
+  if (!section) return row.body_prefix_complete ? {} : { vault_threads_unavailable: { page: { source_id: sourceId, slug: row.slug }, reason: 'section_presence_unknown', full_page_required: true } };
   if (!row.body_prefix_complete && section.index + section[0].length === clean.length) {
     return { vault_threads_unavailable: { page: { source_id: sourceId, slug: row.slug }, reason: 'section_exceeds_card_prefix', full_page_required: true } };
   }

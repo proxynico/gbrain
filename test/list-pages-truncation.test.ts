@@ -233,6 +233,24 @@ describe('list_pages pagination meta for remote callers', () => {
     }
   }, 60_000);
 
+  test('following a filtered notice preserves prefix, predicate and projected fields', async () => {
+    for (const [slug, from] of [['mail/01', 'sender@example.com'], ['mail/02', 'SENDER@example.com'], ['mail/03', 'other@example.com'], ['notes/04', 'sender@example.com']]) {
+      await engine.putPage(slug, { ...page(1), frontmatter: { from_address: from, subject: slug } });
+    }
+    let params: Record<string, unknown> = { sort: 'slug', limit: 1, slug_prefix: 'mail/', frontmatter_filters: [{ field: 'from_address', operator: 'eq_ci', value: 'sender@example.com' }], frontmatter_fields: ['from_address', 'subject'] };
+    const seen: string[] = [];
+    for (let guard = 0; guard < 4; guard++) {
+      const { result, notices } = await remote(params);
+      for (const row of result) {
+        seen.push(row.slug);
+        expect(row.frontmatter).toEqual({ from_address: row.slug === 'mail/01' ? 'sender@example.com' : 'SENDER@example.com', subject: row.slug });
+      }
+      const notice = notices[0] as { fix: { mcp: { arguments: Record<string, unknown> } } } | undefined;
+      if (!notice) break;
+      params = notice.fix.mcp.arguments;
+    }
+    expect(seen).toEqual(['mail/01', 'mail/02']);
+  });
   test('local CLI callers get no notice (stderr stays their channel)', async () => {
     await seed(12);
     const notices: unknown[] = [];
