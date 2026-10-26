@@ -1,8 +1,11 @@
 import type { BrainEngine } from '../../../core/engine.ts';
 import type { Check } from '../../doctor.ts';
 import { agentFix, checkError, doctorVerify, infoCheck } from '../check-fix.ts';
-import { PAGE_BODY_CONFIG_KEYS, parseSegmentedStorage, readPageBodyPolicy, segmentedStorageRequested, segmentedWriterBlockers, SEGMENTED_WRITER_WINDOW_DAYS } from '../../../core/page-body/limits.ts';
-import { SEGMENTED_WRITER_FLOOR } from '../../../core/persistence/writer-versions.ts';
+import { PAGE_BODY_CONFIG_KEYS, parseSegmentedStorage, readPageBodyPolicy, segmentedWriterBlockers, SEGMENTED_WRITER_WINDOW_DAYS } from '../../../core/page-body/limits.ts';
+import { SEGMENTED_WRITER_FLOOR } from '../../../core/page-body/writer-floor.ts';
+import { existingLocalHostId } from '../../../core/persistence/identity.ts';
+import { liveSegmentedBlockers } from '../../../core/persistence/segmented-gate-hold.ts';
+import { VERSION } from '../../../version.ts';
 
 const name = 'segmented_storage';
 const DOCS = 'docs/guides/memory-boundaries.md#segmented-page-storage';
@@ -13,7 +16,10 @@ const enableFix = (why: string) => agentFix(['gbrain', 'config', 'set', PAGE_BOD
  * Wave B activation gate: the configured `pages.segmented_storage`, the value writes use, and the writers seen in
  * the last seven days that do not read segmented pages and keep it off (`segmentedGateWriters`: managed requests,
  * ingest-log runs and resident consumers without the segment-reader mark, or stamped below SEGMENTED_WRITER_FLOOR).
- * While it is off, pages over 1 MiB are written inline up to 24 MiB; stored segmented pages stay readable.
+ * While it is off, pages over 1 MiB are written inline up to 24 MiB; stored segmented pages stay readable. A hold left
+ * only by this host's own writes from before it upgraded (no live blocker, persistence/segmented-gate-hold.ts
+ * `liveSegmentedBlockers`) is information with its clear time, not an upgrade fix; any live blocker keeps the warning
+ * and the upgrade fix.
  */
 export async function segmentedStorageCheck(engine: BrainEngine): Promise<Check> {
   try {
@@ -28,10 +34,15 @@ export async function segmentedStorageCheck(engine: BrainEngine): Promise<Check>
       'disabled_by_choice', enableFix('Turns segmented storage back on: pages over 1 MiB are stored in segments, up to the engine ceiling.'), details);
     if (configured === 'invalid') return { name, status: 'warn', details, fix: enableFix('Replaces the unrecognized value with on.'),
       message: 'pages.segmented_storage holds an unrecognized value, so segmented page storage is off. Set it to on or off.' };
-    if (!segmentedStorageRequested(configured)) return infoCheck(name, 'Segmented page storage is off by default in this release (pages.segmented_storage unset): pages over 1 MiB are stored inline up to 24 MiB; pages already stored in segments stay readable.',
-      'disabled_by_choice', enableFix('Turns segmented storage on: pages over 1 MiB are stored in segments, up to the engine ceiling.'), details);
+    const hosts = listed.map(row => `host ${row.host_id ?? 'unknown (not recorded)'} (principal ${row.principal}) ${row.role} ${row.version}, last seen ${row.last_seen}`);
+    const self = blockers.length ? existingLocalHostId() : null;
+    if (blockers.length && !(await liveSegmentedBlockers(engine, blockers, self)).length) {
+      const clears = new Date(Math.max(...blockers.map(row => Date.parse(row.last_seen!))) + SEGMENTED_WRITER_WINDOW_DAYS * 86_400_000).toISOString();
+      return infoCheck(name, `Segmented page storage is configured ${configured === 'on' ? 'on' : 'on by default'} but held off until ${clears} by writes this host (${self}) made before it upgraded: ${hosts.join('; ')}${blockers.length > SAMPLE ? ` (first ${SAMPLE} shown)` : ''}. `
+        + `This host now runs v${VERSION}, at or above v${SEGMENTED_WRITER_FLOOR}, so nothing needs upgrading; the hold clears ${SEGMENTED_WRITER_WINDOW_DAYS} days after the last of those writes (clears_at), and until then pages over 1 MiB are written inline up to 24 MiB.`,
+        'degraded', undefined, details);
+    }
     if (blockers.length) {
-      const hosts = listed.map(row => `host ${row.host_id ?? 'unknown (not recorded)'} (principal ${row.principal}) ${row.role} ${row.version}, last seen ${row.last_seen}`);
       return { name, status: 'warn', details,
         message: `Segmented page storage is configured ${configured === 'on' ? 'on' : 'on by default'} but held off: ${blockers.length} writer(s) that do not read segmented pages `
           + `(a gbrain older than this release, or stamped below v${SEGMENTED_WRITER_FLOOR}) wrote in the last ${SEGMENTED_WRITER_WINDOW_DAYS} days: ${hosts.join('; ')}${blockers.length > SAMPLE ? ` (first ${SAMPLE} shown)` : ''}. `

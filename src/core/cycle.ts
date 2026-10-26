@@ -59,7 +59,7 @@ import { assertValidSourceId } from './source-id.ts';
 import { PHASE_SCOPE, SOURCE_FRESHNESS_PHASES, type PhaseScope } from './cycle/phase-scope.ts';
 import { acquireLeaseSet, maintenanceLockBusySkip, MAINTENANCE_LEASE_ID } from './cycle/lock-set.ts';
 import { assertEmbedNotStalled } from './embed-stall.ts'; import { embedBackfillFix } from './embed-consent.ts';
-import { anyAbortSignal } from './abort-signals.ts';
+import { anyAbortSignal } from './abort-signals.ts'; import { urlClonePullBlock, urlClonePullBlockSummary } from './url-clone.ts';
 import { maybeRefreshPlannerStats } from './planner-stats.ts'; import { listSourceChangedPages, sourceCycleWindowStamp, unionSlugSets, type SourceCycleWindow } from './cycle/source-window.ts';
 
 export { PHASE_SCOPE, SOURCE_FRESHNESS_PHASES, type PhaseScope } from './cycle/phase-scope.ts';
@@ -524,6 +524,8 @@ export interface CycleOpts {
    * + refreshes the cycle-lock-table TTL.
    */
   yieldBetweenPhases?: () => Promise<void>;
+  /** #7241: awaited as each selected phase starts its work (index and count within this cycle's selection); errors are logged, never fatal. */
+  onPhaseStart?: (phase: CyclePhase, index: number, count: number) => Promise<void> | void;
   /**
    * Generic in-phase keepalive (v0.23). Long-running phases (synthesize
    * waiting on a fan-out aggregator, patterns rolling up reflections)
@@ -1303,6 +1305,7 @@ async function runPhaseSync(
     // doesn't report a clean run over a wedged source. Timeout-class partials
     // keep the pre-existing 'ok' mapping (they converge on retry by design).
     const pullFailedPartial = result.status === 'partial' && result.reason === 'pull_failed';
+    const pullBlock = pullFailedPartial && sourceId ? await urlClonePullBlock(engine, sourceId) : null;
     // Untracked-gap fix: uncommitted working-tree drift (files invisible to
     // commit-driven sync) surfaces as 'warn', not a clean 'ok +0' — a nightly
     // cycle over a dirty vault otherwise reports convergence it never achieved.
@@ -1321,7 +1324,7 @@ async function runPhaseSync(
       duration_ms: 0,
       summary: dryRun
         ? `${syncedCount} page(s) would sync, ${result.deleted} would delete`
-        : pullFailedPartial
+        : pullBlock ? urlClonePullBlockSummary(pullBlock) : pullFailedPartial
           ? `git pull failed, nothing imported — source may be behind its remote (sync anchor unchanged)`
           : `+${result.added} added, ~${result.modified} modified, -${result.deleted} deleted${uncommittedNote}${upstreamNote}`,
       details: {
@@ -1335,6 +1338,7 @@ async function runPhaseSync(
         syncStatus: result.status,
         ...(result.reason ? { syncReason: result.reason } : {}),
         ...(result.uncommitted ? { uncommitted: result.uncommitted } : {}),
+        ...(pullBlock ? { pull_blocked: { code: pullBlock.code, paths: pullBlock.paths, fix: pullBlock.fix } } : {}),
         dryRun,
       },
       pagesAffected: result.pagesAffected,
@@ -1377,7 +1381,7 @@ async function runPhaseExtract(
   sourceId?: string,
 ): Promise<PhaseResult> {
   try {
-    const { runExtractCore } = await import('../commands/extract.ts');
+    const [{ runExtractCore }, { ExtractBatchWriteError }] = await Promise.all([import('../commands/extract.ts'), import('./extract-watermark.ts')]);
     const { resolveIncludeFrontmatter } = await import('./extract-frontmatter.ts');
     // Shared resolver (file plane wins, then DB plane, fail-closed) so this
     // cycle, sync's inline extract, the extract_stale minion and maintain all
@@ -1397,6 +1401,8 @@ async function runPhaseExtract(
     }
     // Incremental path: if sync told us which slugs changed, only extract those.
     // On a 54K-page brain this turns a 10-minute full walk into a sub-second pass.
+    // #6954: a lost link/timeline write leaves its pages due; the stale drain below retries them and the phase warns.
+    let lostWrites: string | null = null;
     const result = await runExtractCore(engine, {
       mode: 'all',
       jsonMode: false, // batch errors stay human-readable on stderr, as in a plain `gbrain extract`
@@ -1406,7 +1412,9 @@ async function runPhaseExtract(
       signal,
       sourceId,
       includeFrontmatter,  // honored on the incremental (slugs) path only
-    });
+      // GBRA-133: with no slug list a managed brain's pass covers every stale page of the source; bound it like the drain below.
+      timeBudgetMs: changedSlugs === undefined ? CYCLE_STALE_DRAIN_BUDGET_MS : undefined,
+    }).catch((error: unknown) => { if (!(error instanceof ExtractBatchWriteError)) throw error; lostWrites = `; ${error.message}`; return null; });
     const linksCreated = result?.links_created ?? 0;
     const timelineCreated = result?.timeline_entries_created ?? 0;
     const incremental = changedSlugs !== undefined;
@@ -1424,6 +1432,8 @@ async function runPhaseExtract(
     // hiccup must not fail the phase).
     let staleRemaining: number | undefined;
     let staleDetails: Record<string, unknown> = {};
+    // GBRA-130 A-1: pages the drain could not derive, or a drain its breaker stopped, make the phase warn with the page and code.
+    let staleWarning: string | null = null;
     try {
       const { extractStaleFromDB } = await import('../commands/extract.ts');
       const drained = await extractStaleFromDB(engine, {
@@ -1442,19 +1452,23 @@ async function runPhaseExtract(
         stale_timeline_created: drained.timelineCreated,
         staleRemaining: drained.staleRemaining, ...(drained.mentions ? { mention_pages: drained.mentions.pages, mention_links_created: drained.mentions.created, mention_due: drained.mentions.remaining, mention_state: drained.mentions.state } : {}),
       };
+      const failures = (await import('./cycle/connector-extract.ts')).staleDrainFailures(drained);
+      if (failures) { staleDetails = { ...staleDetails, ...failures.details }; staleWarning = failures.note; }
     } catch (e) {
       staleDetails = { stale_drain_error: e instanceof Error ? e.message : String(e) };
+      // The breaker stopped a source-scoped drain because most of its pages failed: warn, not a hiccup.
+      if ((e as { code?: unknown } | null)?.code === 'item_failures_systemic') staleWarning = `; the stale drain stopped: ${staleDetails.stale_drain_error}`;
     }
     const { sweepStaleRelationships } = await import('./link-relationships.ts');
     staleDetails = { ...staleDetails, ...(await sweepStaleRelationships(engine)) };
     staleDetails = { ...staleDetails, ...(await (await import('./belief/coverage-report.ts')).cycleBeliefReconcile(engine, sourceId)) };
     return {
       phase: 'extract',
-      status: 'ok',
+      status: staleWarning || lostWrites ? 'warn' : 'ok',
       duration_ms: 0,
-      summary: incremental
+      summary: (incremental
         ? `${linksCreated} link(s), ${timelineCreated} timeline entries (incremental: ${changedSlugs.length} slugs)`
-        : `${linksCreated} link(s), ${timelineCreated} timeline entries`,
+        : `${linksCreated} link(s), ${timelineCreated} timeline entries`) + (lostWrites ?? '') + (staleWarning ?? ''),
       details: {
         linksCreated, timelineCreated,
         pages_processed: result?.pages_processed ?? 0,
@@ -1668,7 +1682,7 @@ async function runPhaseEmbed(engine: BrainEngine, dryRun: boolean, signal?: Abor
         // In dry-run, this counts pages with stale chunks that would
         // have been processed (same semantic as a real run).
         pages_embedded_count: dryRun ? result.pages_processed : embeddedCount > 0 ? result.pages_processed : 0,
-        failures: result.failures,
+        failures: result.failures, ...(result.content_drift ? { content_drift: result.content_drift } : {}),
         ...(failed ? { failure_samples: result.failure_samples, fix: embedBackfillFix({ backlog: result.failures, verifyCheck: 'embeddings' }) } : {}),
       },
     };
@@ -1688,7 +1702,8 @@ async function runPhaseEmbed(engine: BrainEngine, dryRun: boolean, signal?: Abor
  * v0.26.5 — purge phase. Hard-deletes:
  *  - source rows where `archived = true AND archive_expires_at <= now()`
  *    (paired with the cascade FK to `pages`, this also drops the source's pages)
- *  - page rows where `deleted_at` is older than 72h
+ *  - page rows where `deleted_at` is older than `purge.retention_hours` (default 72h), except
+ *    managed sync tombstones with no live twin (#7130), which wait for `gbrain pages purge-deleted`
  *
  * Cascade on `pages` covers `content_chunks`, `page_links`, `chunk_relations`.
  * `dryRun` short-circuits — no DELETEs are issued.
@@ -1743,13 +1758,15 @@ async function runPhasePurge(engine: BrainEngine, dryRun: boolean): Promise<Phas
         details: { dry_run: true, purged_sources_count: 0, purged_pages_count: 0, purged_orphan_clones_count: 0 },
       };
     }
-    const [{ purgeExpiredSources }, { purgeDeletedPagesCoordinated, purgePhaseNote, purgePhaseStatus }] = await Promise.all([import('./destructive-guard.ts'), import('./persistence/purge-deleted.ts')]);
+    const [{ purgeExpiredSources }, { purgeDeletedPagesCoordinated, purgePhaseNote, purgePhaseStatus }, { readPurgeRetentionHours }] = await Promise.all([import('./destructive-guard.ts'), import('./persistence/purge-deleted.ts'), import('./sync-reconcile.ts')]);
     // gbrain#4115: {purged, blocked} — a RESTRICT-FK-held source (revoked
     // oauth_client, v64) is reported and skipped instead of aborting the sweep.
     const purgeResult = await purgeExpiredSources(engine);
     const purgedSources = purgeResult.purged;
-    const purgedPages = await purgeDeletedPagesCoordinated(engine, SOFT_DELETE_TTL_HOURS_FOR_PURGE); // #5405: coordinated on managed brains
-    const purgedClones = await purgeOrphanClones(SOFT_DELETE_TTL_HOURS_FOR_PURGE);
+    const retentionHours = await readPurgeRetentionHours(engine); // #7130: purge.retention_hours (default 72, never less)
+    // #5405: coordinated on managed brains; #7130: `automatic` keeps managed sync tombstones with no live twin.
+    const purgedPages = await purgeDeletedPagesCoordinated(engine, retentionHours, { automatic: true });
+    const purgedClones = await purgeOrphanClones(retentionHours);
     // v0.36+ folded scope item +C: GC stale op_checkpoints rows.
     // 7-day TTL is deliberately generous; any reasonable long-running op
     // finishes inside that window. Cheap (few KB per row).
@@ -1836,10 +1853,6 @@ async function runPhasePurge(engine: BrainEngine, dryRun: boolean): Promise<Phas
   }
 }
 
-/** v0.26.5: matches SOFT_DELETE_TTL_HOURS in destructive-guard.ts. Inlined here
- *  to avoid a static import (purge phase is only loaded in the autopilot path). */
-const SOFT_DELETE_TTL_HOURS_FOR_PURGE = 72;
-
 async function runPhaseOrphans(engine: BrainEngine, sourceId?: string): Promise<PhaseResult> {
   try {
     const { findOrphans } = await import('../commands/orphans.ts');
@@ -1915,6 +1928,9 @@ export async function runCycle(
   const notices = await (await import('./persistence/capacity-snapshot.ts')).capacityNotices(engine, { throttle: false }).catch(() => []);
   return notices.length ? { ...report, notices } : report;
 }
+
+/** #7241: tell `opts.onPhaseStart` a selected phase is starting; a hook error is logged, never fatal. */
+const notifyPhaseStart = (opts: CycleOpts, phase: CyclePhase, phases: readonly CyclePhase[]): Promise<void> => Promise.resolve().then(() => opts.onPhaseStart?.(phase, phases.indexOf(phase), phases.length)).then(() => undefined, (e: unknown) => { console.warn(`[cycle] onPhaseStart hook error (non-fatal): ${e instanceof Error ? e.message : String(e)}`); });
 
 async function runCycleUnscoped(
   engine: BrainEngine | null,
@@ -2176,7 +2192,7 @@ async function runCycleUnscoped(
   // synthesize_concepts still can't carry one (W6). Steal-free cycles behave
   // byte-identically to timePhase.
   // Phase containment (#5484): a failing phase returns a `fail` result so later phases run; abort, lease loss and budget exhaustion still stop the job.
-  const timePhase = <T extends PhaseResult,>(fn: () => Promise<T>, phase: CyclePhase) => timeContainedPhase({ engine, sourceId: cycleSourceId ?? 'default', signal: cycleSignal }, phase, fn);
+  const timePhase = async <T extends PhaseResult,>(fn: () => Promise<T>, phase: CyclePhase) => { await notifyPhaseStart(opts, phase, phases); return timeContainedPhase({ engine, sourceId: cycleSourceId ?? 'default', signal: cycleSignal }, phase, fn); };
   const racedTimePhase = <T extends PhaseResult,>(fn: () => Promise<T>, phase: CyclePhase) => raceStolen(timePhase(fn, phase));
 
   // #1972: reap dead-holder sync/cycle locks at cycle start — before the sync

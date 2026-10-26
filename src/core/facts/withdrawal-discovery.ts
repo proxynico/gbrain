@@ -1,12 +1,14 @@
 import type { BrainEngine } from '../engine.ts';
-import { OperationError } from '../ops/contract.ts';
+import { OperationError, opError } from '../ops/contract.ts';
 import { getCode } from '../retry-matcher.ts';
 import { parseRowCells, isSeparatorRow, stripStrikethrough } from '../fence-shared.ts';
 import { withdrawalFenceBlocks, ambiguousWithdrawalFenceSegments } from './withdrawal-overlay.ts';
-import { PAGE_MAX_BYTES } from '../page-size-policy.ts';
-import { pageBodySegmentedError } from '../page-body/page-shape.ts';
+import { fenceTooLargeError, readStoredFence } from '../page-body/read-range.ts';
+import { FENCE_MAX_BYTES } from '../page-body/limits.ts';
+import { FACTS_FENCE_BEGIN, FACTS_FENCE_END } from '../facts-fence.ts';
+import type { BodyRegion } from '../page-body/types.ts';
 
-export const WITHDRAWAL_LIMITS = { targets: 256, targetBytes: 1024 * 1024, scanMs: 10_000, batch: 128 } as const;
+export const WITHDRAWAL_LIMITS = { targets: 256, targetBytes: 1024 * 1024, scanMs: 10_000, batch: 128, matchRows: 16_384, matchBytes: 8 * 1024 * 1024 } as const;
 export interface WithdrawalTarget { slug: string; page_id: number; revision: string }
 /** `subject` is the ledger subject ('*' = every entity); `claim` is the fact text when the caller already holds it. */
 export interface WithdrawalClaim { visibility: string; fact_hash: string; subject?: string | null; claim?: string | null }
@@ -38,6 +40,21 @@ export function ambiguousFenceClaims(body: string): Array<{ claim: string; visib
   return claims;
 }
 
+/**
+ * One facts fence a forced cut split is matched whole, in one check bounded by WITHDRAWAL_LIMITS.matchRows/matchBytes:
+ * a fence over that bound refuses, naming the fence and how to bring it under the bound.
+ */
+function splitFenceTooLarge(sourceId: string, slug: string, rows: number, bytes: number): never {
+  throw opError('withdrawal_capacity',
+    `Page ${slug} (source ${sourceId}) has a facts fence split across stored segments with ${rows} rows (${bytes} bytes to check), over the ${WITHDRAWAL_LIMITS.matchRows}-row / ${WITHDRAWAL_LIMITS.matchBytes / 1024 ** 2} MiB limit withdrawal discovery checks one split fence within. Source size and the withdrawal ledger are not the limit; this fence is. Nothing was committed; earlier durable intent remains retained.`,
+    `Split that facts fence into smaller fences of at most ${WITHDRAWAL_LIMITS.matchRows} rows each (close it with ${FACTS_FENCE_END}, open the next with ${FACTS_FENCE_BEGIN} and the header row), write the page again, then retry. ${RECOVERY}`,
+    { reason: 'split_fence_rows', why: `Discovery reads a fence a forced segment cut splits whole and checks every row of it at once, up to ${WITHDRAWAL_LIMITS.matchRows} rows.`,
+      fix: { ask_user: true, actor: 'user', consent: [], requires_exclusive: false,
+        why: 'Only an edit of the page brings the fence under the bound; it changes the page layout, not its facts.',
+        user_message: `Page ${slug} has a facts fence of ${rows} rows, more than the ${WITHDRAWAL_LIMITS.matchRows} rows a withdrawal checks in one fence. Split it into fences of at most ${WITHDRAWAL_LIMITS.matchRows} rows each and write the page again? Then retry the withdrawal.`,
+        verify: { argv: ['gbrain', 'get', '--source', sourceId, '--', slug], mcp: { tool: 'get_page', arguments: { slug, source_id: sourceId, body: 'none' } } } } });
+}
+
 /** A fence's claims as discovery matches them: every row of a clean block, and every ambiguous row. */
 function fenceClaims(id: number, slug: string, body: string): Array<{ id: number; slug: string; claim: string; visibility: string | null; ambiguous: boolean }> {
   return [
@@ -48,11 +65,13 @@ function fenceClaims(id: number, slug: string, body: string): Array<{ id: number
 
 /**
  * Wave B (spec 11): every live facts fence of a segmented page that a forced
- * cut split (its slots carry `open_start`), joined from its slots' bytes in
- * segment order and kept when its lowered text holds every token of a claim
- * keyed to the page. Private rows never reach chunks, so this is the only
- * scan that sees them. A fence above PAGE_MAX_BYTES is refused, never
- * skipped. Keyset by (page, region, fence start); one fence in memory.
+ * cut split (its slots carry `open_start`), read from its begin marker through
+ * its end marker across the cuts (readStoredFence: a cut inside either marker
+ * leaves part of it outside every slot) and kept when its lowered text holds
+ * every token of a claim keyed to the page. Private rows never reach chunks, so
+ * this is the only scan that sees them. A fence above FENCE_MAX_BYTES is
+ * refused, never skipped. Keyset by (page, region, fence start); one fence in
+ * memory.
  */
 async function* splitFactsFences(engine: BrainEngine, sourceId: string, keyed: readonly KeyedClaim[], subjects: string[] | null, deadline: number):
   AsyncIterable<{ id: number; slug: string; fence: string }> {
@@ -67,11 +86,10 @@ async function* splitFactsFences(engine: BrainEngine, sourceId: string, keyed: r
     [sourceId, subjects, after[0], after[1], after[2], WITHDRAWAL_LIMITS.batch]);
     for (const f of fences) {
       if (performance.now() > deadline) refuse();
-      if (Number(f.bytes) > PAGE_MAX_BYTES) throw pageBodySegmentedError({ slug: f.slug, source_id: sourceId }, 'withdrawal discovery of a fence larger than the single-string ceiling');
-      const parts = await engine.executeRaw<{ part: Uint8Array }>(`SELECT substring(t.body from (s->>'start')::int + 1 for (s->>'end')::int - (s->>'start')::int) AS part
-        FROM page_body_manifest m CROSS JOIN LATERAL jsonb_array_elements(m.facts_slots) s JOIN page_segment_texts t ON t.source_id=m.source_id AND t.sha256=m.sha256
-        WHERE m.page_id=$1 AND m.region=$2 AND m.gen_to IS NULL AND m.staging_id IS NULL AND (s->>'open_start')::bigint=$3::bigint ORDER BY m.seq`, [f.page_id, f.region, f.open_start]);
-      const fence = Buffer.concat(parts.map(p => Buffer.from(p.part))).toString('utf8');
+      // Its slots hold part of the fence (a cut inside a marker leaves the marker's bytes outside them), so slots over the
+      // bound prove the fence is, before any of it is read.
+      if (Number(f.bytes) > FENCE_MAX_BYTES) throw fenceTooLargeError(f.slug, sourceId, Number(f.bytes));
+      const fence = await readStoredFence(engine, { id: Number(f.page_id), slug: f.slug, sourceId }, f.region as BodyRegion, Number(f.open_start));
       const lowered = fence.toLowerCase();
       if (keyed.some(k => (k.subject === '*' || k.subject === f.slug) && (k.norm ?? '').split(' ').filter(Boolean).every(token => lowered.includes(token)))) {
         yield { id: Number(f.page_id), slug: f.slug, fence };
@@ -115,9 +133,13 @@ export async function discoverWithdrawalTargets(engine: BrainEngine, sourceId: s
     JOIN pages p ON p.source_id=f.source_id AND p.slug=COALESCE(f.source_markdown_slug,f.entity_slug)`, [sourceId, keys]);
   for (const row of provenance) affected.add(row.id);
   if (affected.size > WITHDRAWAL_LIMITS.targets) await refuseAffected(engine, sourceId, affected);
-  const match = async (incoming: Array<{ id: number; slug: string; claim: string; visibility: string | null; ambiguous: boolean }>) => {
+  const match = async (incoming: Array<{ id: number; slug: string; claim: string; visibility: string | null; ambiguous: boolean }>, splitFence?: string) => {
     if (!incoming.length) return;
-    if (incoming.length > 16_384 || Buffer.byteLength(JSON.stringify(incoming)) > 8 * 1024 * 1024) refuse();
+    const bytes = Buffer.byteLength(JSON.stringify(incoming));
+    if (incoming.length > WITHDRAWAL_LIMITS.matchRows || bytes > WITHDRAWAL_LIMITS.matchBytes) {
+      if (splitFence !== undefined) splitFenceTooLarge(sourceId, splitFence, incoming.length, bytes);
+      refuse();
+    }
     const matches = await engine.executeRaw<{ id: number; ambiguous: boolean }>(`SELECT DISTINCT i.id,i.ambiguous
       FROM jsonb_to_recordset($1::text::jsonb) i(id integer,slug text,claim text,visibility text,ambiguous boolean)
       JOIN jsonb_to_recordset($2::text::jsonb) w(visibility text,fact_hash text,subject text)
@@ -157,7 +179,7 @@ export async function discoverWithdrawalTargets(engine: BrainEngine, sourceId: s
     if (rows.length < WITHDRAWAL_LIMITS.batch) break;
     after = [Number(rows[rows.length - 1].id), Number(rows[rows.length - 1].occurrence_id)];
   }
-  for await (const split of splitFactsFences(engine, sourceId, keyed, subjects, deadline)) await match(fenceClaims(split.id, split.slug, split.fence));
+  for await (const split of splitFactsFences(engine, sourceId, keyed, subjects, deadline)) await match(fenceClaims(split.id, split.slug, split.fence), split.slug);
   for (let after = 0; ;) {
     if (performance.now() > deadline) refuse();
     const chunks = await engine.executeRaw<{ id: number; page_id: number; slug: string; chunk_text: string }>(`SELECT c.id,c.page_id,p.slug,c.chunk_text

@@ -205,6 +205,44 @@ took 103 s on 16 vCPU with 12 GB and 8 workers. Measured, not shipped:
 (m 16, ef_construction 64, `vector`). Measurements and method:
 [`docs/eval/hnsw-scale-bench.md`](eval/hnsw-scale-bench.md).
 
+### Vector index prewarm
+
+<a id="vector-index-prewarm"></a>
+
+After a Postgres restart or a cache eviction, the first searches walk HNSW
+pages nobody has read yet: on a brain whose index is bigger than the cache,
+an unseen query reads 2,000 to 4,500 index pages and spends 1.2 to 2.7 s in
+the vector stage. `gbrain embeddings prewarm` loads every HNSW index of the
+brain into `shared_buffers` once with `pg_prewarm(<index>, 'buffer')`, so
+those pages are already cached. It is opt-in and local to the brain host: a
+CLI-only command (no MCP tool, refused by thin clients), and
+`gbrain config set serve.vector_prewarm true` runs it once in the
+background each time `gbrain serve` starts (off by default; a refusal is
+logged and the serve carries on).
+
+`shared_buffers` decides whether it runs. The indexes must total at most
+half of it, read with `current_setting('shared_buffers')`; past that the
+prewarm would evict the heap and keyword-index pages every other read needs.
+`effective_cache_size` is printed but never decides: it is a planner hint
+the operator sets, not memory the server holds. The check reads only catalog
+rows and file sizes, so a refusal reads no index page.
+
+| Command | Does |
+|---|---|
+| `gbrain embeddings prewarm --dry-run --json` | Index sizes, `shared_buffers`, `effective_cache_size`, the budget and the fit; reads nothing |
+| `gbrain embeddings prewarm` | Prewarms when the indexes fit and `pg_prewarm` exists |
+| `gbrain config set serve.vector_prewarm true` | Prewarms at each serve start (restart the serve) |
+
+Refusals, each with a fix: `vector_prewarm_wont_fit` (raise
+`shared_buffers` to at least twice the index size and restart Postgres; a
+managed database sizes it with the instance), `vector_prewarm_extension_missing`
+(`CREATE EXTENSION IF NOT EXISTS pg_prewarm;` as a role that may create
+extensions) and `vector_prewarm_unsupported_engine` (PGLite has no server
+cache to fill). Prewarmed pages stay cached until Postgres restarts or other
+reads evict them; pg_prewarm's own `autoprewarm` worker
+(`shared_preload_libraries = 'pg_prewarm'`) can reload them after a restart
+without gbrain.
+
 ### Opt-in RLS source-scope binding (`GBRAIN_RLS_SCOPE_BINDING`)
 
 Defense-in-depth layer for Postgres deployments that want the database itself
@@ -253,8 +291,9 @@ live in `test/postgres-engine-rls-scope.test.ts`.
 keeps its text in `page_segment_texts`, its layout and headings in
 `page_body_manifest`, uploads in progress in `page_body_stagings` /
 `page_body_staging_parts` (with the segment texts each one holds in
-`page_body_staging_texts`), and view sizes in `page_view_digests`. gbrain
-enables RLS on all six on every schema replay, as it does on `pages` and
+`page_body_staging_texts`), view sizes in `page_view_digests`, and per-segment
+derivation results (link candidates, window anchors) in `page_segment_derivations`.
+gbrain enables RLS on all seven on every schema replay, as it does on `pages` and
 `content_chunks`, so with no policy a role that does not bypass RLS reads no row
 of them. Title search, the source-scoped vector scan, the chunk windows search
 reads around its hits, `get_chunks` and get_page check a chunk of a page stored
@@ -297,6 +336,9 @@ CREATE POLICY page_body_staging_parts_scope_filter ON page_body_staging_parts
 CREATE POLICY page_view_digests_scope_filter ON page_view_digests
   USING (current_setting('app.scopes', true) = '*'
          OR EXISTS (SELECT 1 FROM pages p WHERE p.id = page_id));
+CREATE POLICY page_segment_derivations_scope_filter ON page_segment_derivations
+  USING (current_setting('app.scopes', true) = '*'
+         OR EXISTS (SELECT 1 FROM pages p WHERE p.id = page_id));
 CREATE POLICY content_chunks_scope_filter ON content_chunks
   USING (current_setting('app.scopes', true) = '*'
          OR EXISTS (SELECT 1 FROM pages p WHERE p.id = page_id));
@@ -313,6 +355,7 @@ ALTER TABLE page_body_stagings FORCE ROW LEVEL SECURITY;
 ALTER TABLE page_body_staging_parts FORCE ROW LEVEL SECURITY;
 ALTER TABLE page_body_staging_texts FORCE ROW LEVEL SECURITY;
 ALTER TABLE page_view_digests FORCE ROW LEVEL SECURITY;
+ALTER TABLE page_segment_derivations FORCE ROW LEVEL SECURITY;
 ALTER TABLE content_chunks FORCE ROW LEVEL SECURITY;
 ```
 <!-- gbrain:segmented-rls-recipe:end -->
@@ -425,7 +468,7 @@ and the fix is the read-only `gbrain migrate --to postgres --plan --json`.
 | Cost | Free | Supabase Pro ($25/mo) |
 | Concurrency | Single process | Connection pooling |
 | Backups | Manual (file copy) | Managed by Supabase |
-| Largest page | 24 MiB; 128 MiB stored in segments with `pages.segmented_storage on` (`pages.max_bytes`) | 24 MiB; 256 MiB stored in segments with `pages.segmented_storage on` (`pages.max_bytes`) |
+| Largest page | 128 MiB, stored in segments (`pages.max_bytes`) | 256 MiB, stored in segments (`pages.max_bytes`) |
 
 **The belief ledger lives only in the database.** `belief_events` and its side tables record what the brain had recorded, and when (`gbrain beliefs status`). Markdown carries only current state, so a rebuild from Markdown, `gbrain reinit-pglite` or a dropped database starts an empty history; back up the database itself. After restoring a Postgres (or PGLite) backup, replay the purges made after the backup was taken: until then content purged later is readable again, and `gbrain doctor --only belief_ledger_coverage` reports a restore whose purge replay was partial, unavailable or unverified. Graduation copies the ledger verbatim (equal event keys and digests); the legacy copier refuses a brain that has one.
 
@@ -524,6 +567,54 @@ version bump changes it.
 to connect: it diagnoses the dir from disk, names the repair command, reports
 retained repair backups, and escalates when repairs keep recurring (that
 means the unclean-shutdown genesis is still active — see the ladder's rung 4).
+
+<a id="legacy-pglite-lock"></a>
+### Legacy PGLite lock (`pglite_busy` reason `legacy_owner_unverified`)
+
+A PGLite brain is owned through the stable sibling kernel lock
+`<data-dir>.gbrain-owner.lock`. Brains last opened by an older gbrain may
+still hold that release's lock folder, `<data-dir>/.gbrain-lock/`. The first
+open by a current gbrain removes it automatically only when it can prove the
+old owner is dead: readable metadata with a PID that `kill -0` reports gone
+and, on Linux, the same PID namespace and boot id as this process. A live
+owner keeps the ordinary `pglite_busy` refusal.
+
+When the folder's metadata is torn or missing, records no PID, or (Linux) does
+not prove the PID ran in this namespace since the last boot, waiting never
+helps, so the open refuses `pglite_busy` with reason
+`legacy_owner_unverified` (class consent, exit 3, not retryable). Its fix
+asks the user and starts with the read-only preview; `gbrain doctor` shows
+the same reason and fix on its `connection` check.
+
+1. **Preview.** `gbrain pglite-repair --legacy-lock --dry-run --json [--path <dir>]`
+   never opens the engine and never creates anything. It names the recorded
+   PID, whether `kill -0` says it is running and its command, the processes
+   an open-file scan of `/proc` (Linux) saw holding files under the data dir,
+   and the filesystem type (Linux `statfs`, macOS `df -P` and `mount`), and prints the `plan_hash` and
+   the apply command. This evidence is advisory: it covers only this host and
+   PID namespace and cannot see other containers or other hosts that share the
+   folder.
+2. **Apply, after the user agrees.**
+   `gbrain pglite-repair --legacy-lock --path <dir> --yes --expect <plan_hash>`
+   takes the kernel lock (so no current gbrain can be running), inspects
+   again under it and refuses `legacy_lock_removal_refused` while a process
+   on this host holds the data dir or the recorded PID runs a command that
+   could be gbrain (`live_holder`), or when the data dir is on a network or
+   shared filesystem such as NFS, SMB, 9p, virtiofs or FUSE
+   (`network_filesystem`), or when it cannot confirm the filesystem is local
+   (`filesystem_unverified`: Linux reads `statfs`; macOS reads the mount
+   point from `df -P` and its `mount` line, and counts it local only with
+   the `local` flag and a local type such as apfs or hfs. Other systems, a
+   failed probe, an unrecognised type, a macOS network mount such as smbfs or
+   nfs, and a macOS mount without the `local` flag all refuse). A lock that changed since the preview refuses `preview_changed`.
+   It inspects again after consent, so a holder or change that appears while
+   the prompt waits refuses the same way. Otherwise it moves the folder into
+   `<data-dir>.legacy-lock-removed-<timestamp>/` (nothing is deleted) with a
+   `receipt.json` and the exact restore command (it also puts back the prior
+   `<data-dir>.gbrain-owner.json` bytes, kept as `prior-owner-marker.json`,
+   or removes the new marker when there was none), writes the kernel-v1 marker
+   `<data-dir>.gbrain-owner.json`, and starts the 10-minute WAL-repair
+   quarantine (`<data-dir>.lock-reap.json`). The next ordinary open succeeds.
 
 ## Canonical schema sources
 
@@ -732,10 +823,35 @@ Size the pooler for every process at once:
 
 ```
 long-running processes x GBRAIN_POOL_SIZE
-  + processes with GBRAIN_DIRECT_DATABASE_URL x GBRAIN_DIRECT_POOL_SIZE (default 3)
-  + one-shot commands running at the same time x their pool
+  + processes whose direct route lands on this pooler x their direct pool (see below)
+  + one-shot commands running at the same time x their pool (a full `gbrain sync` is one too)
+  + parallel import workers x 2 (an unmanaged sync of more than 100 files, `--workers N`, or the sync a serve runs)
   <= the pooler's client limit (Supabase Supavisor: the project's pool_size)
 ```
+
+The direct route lands on the pooler when `GBRAIN_DIRECT_DATABASE_URL` names it,
+and also when gbrain derives it from a Supabase pooler URL whose user does not
+name the project (`postgres.<ref>`): the derived route keeps the pooler host on
+port 5432, its session port, even when the main URL uses transaction mode
+(6543). Two long-running processes at the
+defaults (10 + 3 each) already pass a client limit of 25, so a scheduled
+`gbrain sync` next to a `gbrain serve` on the same session port can exhaust it.
+`GBRAIN_MAX_CONNECTIONS` caps a sync's worker fan-out to fit a budget.
+
+<a id="direct-pool-by-command"></a>The direct pool's size follows the command.
+`gbrain serve`, `gbrain jobs`, `gbrain autopilot` and `gbrain sync --watch`
+open up to 3 direct connections. A command that exits but owns writes or takes
+a lease (`sync`, `put`, `import`, `dream`, `cycle`, `sources`, `mcp`,
+`migrate-graduation`) and the diagnostics that report the route (`doctor`,
+`engine`) open 1. Every other command routes nothing through the direct pool:
+its statements use the ordinary pool, as with `GBRAIN_DISABLE_DIRECT_POOL=1`.
+Two exceptions keep the direct route for it: applying pending schema
+migrations (one connection, for the session advisory lock and the 30-minute
+statement timeout), and taking a lease such as an embed or extract lock
+(the command then opens 1, so the lease heartbeat keeps its own connection).
+`GBRAIN_DIRECT_POOL_SIZE` still sets the size wherever a direct pool opens.
+`GBRAIN_DIRECT_POOL_BY_COMMAND=0` restores the earlier behavior: every command
+may open the full 3-connection direct pool.
 
 When the sum does not fit, run fewer long-running processes (for example one
 shared `gbrain serve --http` instead of one stdio `serve` per agent session),
@@ -999,6 +1115,25 @@ checkpoint did not advance. The message names both errors (redacted, at most
 200 characters each). Fix the cause they name, then run
 `gbrain backfill <kind> --resume`.
 
+<a id="backfill-commit-indeterminate"></a>**`backfill_commit_indeterminate`** (error).
+A `gbrain backfill` batch sent its `COMMIT` and got no verdict from the
+server (for example the connection dropped), so the batch may or may not have
+committed. The run stops without bisecting or skipping anything, and the
+checkpoint stays before the batch. Run `gbrain backfill <kind> --resume`:
+rows that did commit no longer match the backfill and are not redone.
+
+<a id="backfill-skipped-rows"></a>**Skipped backfill rows.** A row whose compute
+or UPDATE fails on its own (a CHECK or type violation, a compute error) is
+isolated by splitting its batch, each part in its own transaction, and recorded
+in the config key `backfill.<kind>.skipped`; the checkpoint moves past it and
+the other rows land. `gbrain backfill <kind>` prints each recorded row with
+its code and the retry command, and every later run retries it first. A row
+that fails with the same content error on 3 consecutive runs (same row, same
+gbrain version) is held: it is reported but not retried until the row or the
+gbrain version changes; `gbrain backfill <kind> --fresh` retries it now. When
+most rows of a run fail, the run stops with `item_failures_systemic` and keeps
+the skip record and checkpoint it began with.
+
 <a id="persistence-consumer-log"></a>**`[persistence] phase=<phase> reason=<code>`**
 (stderr). The resident write consumer could not finish a phase. `reason` is
 the SQLSTATE (for example `53300` when a pooler's client limit is reached),
@@ -1008,10 +1143,17 @@ at most 200 characters. When an unexpected exception in the owner failed a
 write (`storage_error` with a generic public message; the class and frame stay owner-only),
 the line also carries `class=`, `errno=` and `frame=` (the top gbrain source
 frame, repo-relative, for example `src/core/persistence/page-prepare.ts:120`):
-the owner diagnostics the receipt points at. The stored receipt keeps the same
-identifiers (never the error message) owner-side in `error_detail`, with the
-build that ran the attempt; `gbrain write-request <id>` names an owner on
-another build than the CLI (`owner_build`) and the restart to run. Connection-wait evidence follows on Postgres:
+the owner diagnostics the receipt points at. For a database server error it
+adds `error_text=`, `statement=` and `position=` (#7112): the server's primary
+message with every quoted value replaced by `…` (an object name such as a
+column, a relation or the token a syntax error stopped at is kept), the first
+line of the failing statement with its literals replaced, never its
+parameters, and the error's character position. A PL/pgSQL `RAISE` keeps no
+text, because it can carry page values. The stored receipt keeps the same
+identifiers (never an application error's message) owner-side in `error_detail`, with the
+build that ran the attempt; on the brain host `gbrain write-request <id> --json`
+prints that `error_detail`, and names an owner on another build than the CLI
+(`owner_build`) and the restart to run. Connection-wait evidence follows on Postgres:
 `first_conn_ms` is the time from phase start until the phase obtained a
 connection; `checkout=not_observed conn_wait_ms=<n>` means it had not obtained
 one after `n` milliseconds (a saturated pool or pooler, not a slow query); and

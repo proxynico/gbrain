@@ -45,7 +45,9 @@
  * `guardTriggered` and the halt rollup still report the run; status returns
  * `warn` naming each failed page. Rows with no backing page or checkout
  * (slugify-floor / stub-guard-blocked slugs from the inline writer) are
- * structurally unfenceable and never gate.
+ * structurally unfenceable and never gate, and neither are the rows of a
+ * clone gbrain owns (#6946), which stay database-only and out of
+ * reconciliation.
  */
 
 import { withUnmanagedBeliefs } from '../belief/projection-point.ts';
@@ -70,6 +72,7 @@ import { resolveManagedFactsEmbedding } from '../persistence/facts-maintenance.t
 import { isSegmentedPage } from '../page-body/page-shape.ts';
 import { REVISION_BACKFILL_PENDING } from '../page-state/types.ts';
 import { opError, OperationError } from '../ops/contract.ts';
+import { ItemRun } from '../item-failure.ts';
 import {
   resolveSupersededByRow,
   supersessionChainOf,
@@ -80,10 +83,14 @@ import { writeReceipt } from '../extract/receipt-writer.ts';
 import { fenceUnfencedFacts, planUnfencedFacts } from '../facts/unfenced-facts.ts';
 import { classifyRunStop, upsertExtractRollup } from '../extract/rollup-writer.ts';
 import { factsFenceView } from '../facts-fence.ts';
-import { segmentedBodyMatchesFile, segmentedFactsFenceView } from '../page-body/segment-facts.ts';
+import { fenceReadOf, publishFenceGeneration, readFenceBlocks, FACT_FENCE_KIND, type FenceRead } from '../generations/fence.ts';
+import type { BodyStorage } from '../page-body/types.ts';
+import { factFenceItems, factPreimages, factRetireItem } from '../generations/adapters/fact-rows.ts';
+import { incrementalFactsFence, segmentedBodyMatchesFile } from '../page-body/segment-facts.ts';
 import {
   duplicateActiveFenceRows,
   extractFactsFromFenceText,
+  FACT_DATE_SOURCES,
   type FenceExtractedFact,
 } from '../facts/extract-from-fence.ts';
 import {
@@ -95,6 +102,7 @@ import { embed, getEmbeddingDimensions, getEmbeddingModel, isAvailable } from '.
 import { isAborted } from '../abort-check.ts';
 import { parseMarkdown } from '../markdown.ts';
 import { isWriteThroughDisabled, resolvePageWriteTarget } from '../write-through.ts';
+import { urlCloneReadOnly } from '../url-clone.ts';
 import { acquirePageLock } from '../page-lock.ts';
 import {
   lockReconcileRevision,
@@ -365,11 +373,13 @@ async function listExistingFactsForPage(
 
 /** The page a reconcile plans from: its body as strings, or a segmented page whose fences are read from its segments. */
 type PageFenceInput = { id?: number; slug?: string; source_id?: string; body_storage?: Page['body_storage']; compiled_truth: string | null; timeline: string | null;
-  effective_date?: Date | string | null };
+  effective_date?: Date | string | null; effective_date_source?: string | null };
 
 interface FenceReconcilePlan {
   /** Rows the parsed fence carries (duplicates included), for the pages-with-facts count. */
   fenceRows: number;
+  /** GBRA-161 PR 2: what the reconcile read of the fence; only a fence read whole retires rows (fence.ts). */
+  read: FenceRead;
   extracted: FenceExtractedFact[];
   matched: Map<number, ExistingPageFact>;
   stale: ExistingPageFact[];
@@ -386,7 +396,9 @@ interface FenceReconcilePlan {
  * fence in each section of the page (#6686: a split fence) preserves the page's existing index.
  */
 async function planFenceReconcile(db: BrainEngine, page: PageFenceInput, slug: string, sourceId: string, warnings: string[]): Promise<FenceReconcilePlan | null> {
-  const view = isSegmentedPage(page) ? await segmentedFactsFenceView(db, page) : factsFenceView(page);
+  // A segmented page's view and fence text come from its fences rows: only runs changed since their row was written are read.
+  const segmented = isSegmentedPage(page) ? await incrementalFactsFence(db, page) : null;
+  const view = segmented?.view ?? factsFenceView(page);
   // #6686: a lone fence below the timeline sentinel that parses cleanly is the page's fence, read where the writers
   // edit it; one that does not parse keeps the #3625 guard below.
   const below = !view.sections.body && view.sections.timeline ? view.timeline : null;
@@ -419,8 +431,9 @@ async function planFenceReconcile(db: BrainEngine, page: PageFenceInput, slug: s
     return null;
   }
   // v0.35.4 (D-ENG-1): page.effective_date is the fallback valid_from, so
-  // trajectory queries see claim dates rather than import dates.
-  const pageEffectiveDate = page.effective_date ? new Date(page.effective_date) : null;
+  // trajectory queries see claim dates rather than import dates. #7247: only a date the
+  // page states; a creation or fallback date is when the page was made or imported.
+  const pageEffectiveDate = page.effective_date && FACT_DATE_SOURCES.has(page.effective_date_source ?? '') ? new Date(page.effective_date) : null;
   // #1781: duplicate ACTIVE rows (same claim and source) index once.
   const duplicates = duplicateActiveFenceRows(parsed.facts);
   const extracted = extractFactsFromFenceText(parsed.facts, slug, sourceId, { pageEffectiveDate })
@@ -452,7 +465,8 @@ async function planFenceReconcile(db: BrainEngine, page: PageFenceInput, slug: s
       return resolveSupersession(f, byRow, chain, slug).superseded_by === (stored == null ? null : Number(stored));
     });
   }
-  return { fenceRows: parsed.facts.length, extracted, matched, stale, updates, toInsert, chain, inSync };
+  const read: FenceRead = segmented ? fenceReadOf(segmented.blocks) : readFenceBlocks(page, 'facts');
+  return { fenceRows: parsed.facts.length, read, extracted, matched, stale, updates, toInsert, chain, inSync };
 }
 
 /**
@@ -474,7 +488,16 @@ function reconcileWrites(plan: FenceReconcilePlan) {
 
 /** One page's reconcile writes, inside a transaction that holds the page key. */
 async function writeFenceReconcile(tx: BrainEngine, sourceId: string, slug: string, plan: FenceReconcilePlan,
-  writes: ReturnType<typeof reconcileWrites>, signal?: AbortSignal): Promise<{ inserted: number; updated: number; warnings: string[]; write_gate?: GateTally }> {
+  writes: ReturnType<typeof reconcileWrites>, signal?: AbortSignal): Promise<{ inserted: number; updated: number; deleted: number; held?: true; warnings: string[]; write_gate?: GateTally }> {
+  // GBRA-161 PR 2: the fact generation decides before any row changes. A fence that is absent or not read whole holds
+  // (`fence_absent`) and the page's rows stay exactly as they are; a published one records each retired row's before-state.
+  const retiring = [...writes.detach, ...writes.expireInPlace].map(f => Number(f.id));
+  const generation = await publishFenceGeneration(tx, { kind: FACT_FENCE_KIND, sourceId, slug, read: plan.read, items: factFenceItems(plan.extracted),
+    retire: (await factPreimages(tx, sourceId, retiring)).map(factRetireItem), writer: 'extract_facts' });
+  if (generation.state === 'held') {
+    return { inserted: 0, updated: 0, deleted: 0, held: true, warnings: [`${slug}: FACTS_FENCE_HELD: ${generation.reason}: the page's facts fence is ${plan.read.state}, so its `
+      + `${retiring.length} fact row(s) were kept, not retired; gbrain doctor --only generation_held names the user's choice (restore the fence or write an empty one)`] };
+  }
   const tally = emptyGateTally();
   // #5575 I2: the fence rows restate the page (no model), so every write here is at the page's tier, capped at operator_curated.
   const derivation = await deriveTrust(tx, [{ table: 'pages', sourceId, slug }], { channel: 'derive:facts_fence', projection: true });
@@ -509,7 +532,7 @@ async function writeFenceReconcile(tx: BrainEngine, sourceId: string, slug: stri
   const linked = await syncSupersession(tx, sourceId, slug, plan.extracted, plan.chain, insertedRows);
   signal?.throwIfAborted();
   const updated = new Set([...plan.updates.map(f => f.row_num), ...linked.changed.filter(row => !insertedRows.has(row))]);
-  return { inserted: inserted.inserted, updated: updated.size, warnings: linked.warnings, ...(mergeGateTally(tally, undefined) ? { write_gate: tally } : {}) };
+  return { inserted: inserted.inserted, updated: updated.size, deleted: retiring.length, warnings: linked.warnings, ...(mergeGateTally(tally, undefined) ? { write_gate: tally } : {}) };
   });
 }
 
@@ -576,8 +599,7 @@ export async function prepareFenceFactsReconcile(engine: BrainEngine, row: Write
       }
       const writes = reconcileWrites(plan);
       const written = await writeFenceReconcile(tx, row.source_id, row.slug, plan, writes);
-      return { status: 'completed', ...written, deleted: writes.detach.length + writes.expireInPlace.length, deferred: writes.deferInserts,
-        warnings: [...warnings, ...written.warnings] };
+      return { status: 'completed', ...written, deferred: writes.deferInserts, warnings: [...warnings, ...written.warnings] };
     } };
 }
 
@@ -616,15 +638,27 @@ export async function prepareDeletedPageFactsExpiry(engine: BrainEngine, row: Wr
   await authorizeWrite(engine, row.authority, 'submit_job', row.slug);
   return { observedRevision: snapshot.revision, noop: true,
     validate: async tx => { await authorizeWrite(tx, row.authority, 'submit_job', row.slug); },
-    apply: async tx => {
-      const expired = await tx.executeRaw<{ id: number }>(
-        `UPDATE facts f SET expired_at = now()
-          WHERE f.source_id = $1 AND f.source_markdown_slug = $2 AND f.row_num IS NOT NULL AND f.expired_at IS NULL
-            AND EXISTS (SELECT 1 FROM pages p WHERE p.source_id = $1 AND p.slug = $2 AND p.id = $3 AND p.deleted_at IS NOT NULL)
-          RETURNING f.id`,
-        [row.source_id, row.slug, Number(row.page_id)]);
-      return { status: 'completed', expired: expired.map(e => Number(e.id)) };
-    } };
+    apply: async tx => ({ status: 'completed', expired: await expireDeletedPageFacts(tx, row.source_id, row.slug, Number(row.page_id)) }) };
+}
+
+/**
+ * GBRA-161 PR 2: one deleted page's fence rows expire (never detach: a restored page re-matches them) only on
+ * `originGone`, which the fact generation rechecks under the page key; a restored page (or one whose id moved) expires
+ * nothing. Each expired row's before-state is recorded on the ledger. Returns the expired ids.
+ */
+async function expireDeletedPageFacts(tx: BrainEngine, sourceId: string, slug: string, pageId: number | null): Promise<number[]> {
+  const ids = (await tx.executeRaw<{ id: number }>(
+    `SELECT f.id FROM facts f WHERE f.source_id = $1 AND f.source_markdown_slug = $2 AND f.row_num IS NOT NULL AND f.expired_at IS NULL
+        AND EXISTS (SELECT 1 FROM pages p WHERE p.source_id = $1 AND p.slug = $2 AND ($3::integer IS NULL OR p.id = $3::integer) AND p.deleted_at IS NOT NULL)`,
+    [sourceId, slug, pageId])).map(r => Number(r.id));
+  if (!ids.length) return [];
+  const [stored] = await tx.executeRaw<{ compiled_truth: string | null; timeline: string | null; body_storage: BodyStorage | null }>(
+    'SELECT compiled_truth, timeline, body_storage FROM pages WHERE source_id = $1 AND slug = $2 AND deleted_at IS NOT NULL ORDER BY id DESC LIMIT 1', [sourceId, slug]);
+  const generation = await publishFenceGeneration(tx, { kind: FACT_FENCE_KIND, sourceId, slug, read: stored ? readFenceBlocks(stored, 'facts') : { state: 'absent' }, items: [], originGone: true,
+    retire: (await factPreimages(tx, sourceId, ids)).map(factRetireItem), writer: 'deleted_page' });
+  if (generation.state !== 'published') return [];
+  return (await tx.executeRaw<{ id: number }>('UPDATE facts SET expired_at = now() WHERE source_id = $1 AND id = ANY($2::bigint[]) AND expired_at IS NULL RETURNING id',
+    [sourceId, ids])).map(r => Number(r.id));
 }
 
 export interface ExtractFactsOpts {
@@ -796,9 +830,10 @@ export async function runExtractFacts(
   // the destructive reconciliation pass; the other pages reconcile.
   // #6610: rows the unbound-source policy keeps unfenced on database-only pages stay held out of reconciliation
   // but never gate the run; doctor fence_integrity names the opt-in that fences them.
+  // #6946: so do the database-only rows of a clone gbrain owns, which is never fenced.
   const pending = await pendingLegacyRows(engine, sourceId);
   const legacySlugs = new Set(pending.keys());
-  const gating = [...pending].filter(([slug]) => !unboundRefused.has(slug));
+  const gating = await urlCloneReadOnly(engine, sourceId) ? [] : [...pending].filter(([slug]) => !unboundRefused.has(slug));
   const legacyCount = gating.reduce((sum, [, n]) => sum + n, 0);
   result.legacyRowsPending = legacyCount;
   result.legacyPages = gating.map(([slug]) => slug).sort();
@@ -874,6 +909,9 @@ export async function runExtractFacts(
   result.phantomsHeldLegacyRows = phantomResult.held_legacy_rows;
   result.phantomsLockBusy = phantomResult.lock_busy;
   result.phantomsMorePending = phantomResult.more_pending;
+  for (const held of phantomResult.held) result.warnings.push(`phantom_redirect_held: ${held}`);
+  for (const f of phantomResult.failures) result.warnings.push(`phantom_redirect_failed: ${f.key} (${f.code}); retry: ${(f.fix.argv ?? []).join(' ')}`);
+  if (phantomResult.stopped) result.warnings.push(`phantom_redirect_stopped: ${phantomResult.stopped.message.slice(0, 300)}`);
 
   // ── Facts of soft-deleted pages ────────────────────────────────
   // Deleting a page removes the fence that is the facts' system of record,
@@ -885,19 +923,21 @@ export async function runExtractFacts(
   // forgotten claims expired). Rows of a page that simply has no DB row yet
   // (a fence write ahead of sync) are untouched.
   if (!opts.dryRun) {
-    const expireDeleted = (db: BrainEngine) => db.executeRaw<{ id: number }>(
-      `UPDATE facts f SET expired_at = now()
-        WHERE f.source_id = $1 AND f.row_num IS NOT NULL AND f.expired_at IS NULL
-          AND EXISTS (SELECT 1 FROM pages p
-                       WHERE p.source_id = f.source_id AND p.slug = f.source_markdown_slug
-                         AND p.deleted_at IS NOT NULL)
-        RETURNING f.id`,
-      [sourceId],
-    );
+    // GBRA-161 PR 2: one transaction per deleted page, under its key, retiring through the fact generation (originGone).
+    const expireDeleted = async () => {
+      const expired: Array<{ id: number }> = [];
+      for (const slug of await deletedPagesWithActiveFacts(engine, sourceId)) {
+        expired.push(...(await maintenanceTransaction(engine, async tx => {
+          await tx.lockPageKeys([{ sourceId, slug }]);
+          return expireDeletedPageFacts(tx, sourceId, slug, null);
+        })).map(id => ({ id })));
+      }
+      return expired;
+    };
     // Managed: one receipted request per page, rechecked under its key, so a
     // concurrent restore is either seen as restored or waited for, never
     // expired underneath it.
-    const expired = managed ? await expireDeletedPagesManaged(engine, sourceId, managedAuthority) : await maintenanceTransaction(engine, expireDeleted);
+    const expired = managed ? await expireDeletedPagesManaged(engine, sourceId, managedAuthority, result.warnings) : await expireDeleted();
     result.factsExpiredForDeletedPages = expired.length;
   }
 
@@ -1112,18 +1152,38 @@ export async function runExtractFacts(
   return result;
 }
 
-async function expireDeletedPagesManaged(engine: BrainEngine, sourceId: string,
-  managedAuthority: () => Promise<MaintenanceAuthority | null>): Promise<Array<{ id: number }>> {
-  const pages = await engine.executeRaw<{ slug: string }>(
+/**
+ * A refused page never stops the expiry or the reconcile after it (GBRA-130 A-21): it is a
+ * FACTS_EXPIRE_FAILED warning retried by the next run; a page the refusal breaker holds back is skipped.
+ */
+/** The soft-deleted pages of `sourceId` that still have active fence rows. */
+async function deletedPagesWithActiveFacts(engine: BrainEngine, sourceId: string): Promise<string[]> {
+  return (await engine.executeRaw<{ slug: string }>(
     `SELECT DISTINCT f.source_markdown_slug AS slug FROM facts f
       WHERE f.source_id = $1 AND f.row_num IS NOT NULL AND f.expired_at IS NULL
-        AND EXISTS (SELECT 1 FROM pages p WHERE p.source_id = f.source_id AND p.slug = f.source_markdown_slug AND p.deleted_at IS NOT NULL)`,
+        AND EXISTS (SELECT 1 FROM pages p WHERE p.source_id = f.source_id AND p.slug = f.source_markdown_slug AND p.deleted_at IS NOT NULL)
+      ORDER BY 1`,
     [sourceId],
-  );
+  )).map(row => row.slug);
+}
+
+async function expireDeletedPagesManaged(engine: BrainEngine, sourceId: string,
+  managedAuthority: () => Promise<MaintenanceAuthority | null>, warnings: string[]): Promise<Array<{ id: number }>> {
   const expired: Array<{ id: number }> = [];
-  for (const { slug } of pages) {
+  const run = new ItemRun('extract_facts.expire_deleted');
+  for (const slug of await deletedPagesWithActiveFacts(engine, sourceId)) {
     const authority = (await managedAuthority())!;
-    expired.push(...(await expireDeletedPageFactsManaged(engine, authority, slug)).map(id => ({ id })));
+    try {
+      expired.push(...(await expireDeletedPageFactsManaged(engine, authority, slug)).map(id => ({ id })));
+      run.succeed();
+    } catch (error) {
+      if (error instanceof OperationError && error.detail === 'refusal_breaker') {
+        warnings.push(`FACTS_EXPIRE_SKIPPED: ${slug}: ${error.code}: the same expiry was refused repeatedly; it is tried again once the page changes or the oldest refusal is 24 hours old`);
+        continue;
+      }
+      const failure = run.fail(slug, error);
+      warnings.push(`FACTS_EXPIRE_FAILED: ${slug}: ${failure.code}: ${failure.message.slice(0, 200)} (retried by the next extract_facts run${failure.requestId ? `; gbrain write-request -- ${failure.requestId} names the refusal` : ''})`);
+    }
   }
   return expired;
 }
