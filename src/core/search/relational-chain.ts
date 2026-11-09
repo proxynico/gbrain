@@ -34,7 +34,8 @@ export const LINK_SIGNATURES: Readonly<Record<string, { subject: readonly string
   invested_in: { subject: ['person', 'company'], object: ['company', 'deal'] },
   led_round: { subject: ['person', 'company'], object: ['company', 'deal'] },
   advises: { subject: ['person'], object: ['company'] },
-  works_at: { subject: ['person'], object: ['company'] },
+  // nicobrain: LP's members and carriers are companies with their own page types.
+  works_at: { subject: ['person'], object: ['company', 'member', 'carrier'] },
   attended: { subject: ['person'], object: ['meeting'] },
   yc_partner: { subject: ['person'], object: ['company'] },
 };
